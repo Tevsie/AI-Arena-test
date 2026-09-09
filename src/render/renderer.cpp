@@ -248,6 +248,13 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                      float aspect, int width, int height, bool targetHot) {
     if (!ready_) return 0;
 
+    // ---- frame setup (viewport + clear every frame) -------------------------
+    gl.Viewport(0, 0, width, height);
+    gl.ClearColor(0.16f, 0.19f, 0.24f, 1.0f);
+    gl.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    gl.DepthFunc(GL_LESS);
+    gl.Disable(GL_CULL_FACE);
+
     // ---- upload dirty chunks + frustum-cull in one pass ---------------------
     Frustum frustum = Frustum::fromMatrix(viewProj);
     int visible = 0;

@@ -9,6 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 namespace aw {
@@ -274,6 +275,7 @@ inline const Entry* entries() {
 template <typename F>
 bool loadGL(F&& loader) {
     int missing = 0;
+    const char* firstMissing[4] = {nullptr, nullptr, nullptr, nullptr};
     for (const detail::Entry* e = detail::entries(); e->name; ++e) {
         auto** slot = reinterpret_cast<void**>(reinterpret_cast<char*>(&gl) + e->offset);
         void* p = loader(e->name);
@@ -283,8 +285,18 @@ bool loadGL(F&& loader) {
             p = loader("glVertexAttribDivisor");
         if (!p && std::strcmp(e->name, "glDrawArraysInstancedARB") == 0)
             p = loader("glDrawArraysInstanced");
-        if (!p) { ++missing; continue; }
+        if (!p) {
+            if (missing < 4) firstMissing[missing] = e->name;
+            ++missing;
+            continue;
+        }
         *slot = p;
+    }
+    if (missing > 0) {
+        std::fprintf(stderr, "[aw] loadGL: %d missing entry points", missing);
+        for (int i = 0; i < 4 && firstMissing[i]; ++i)
+            std::fprintf(stderr, "  %s", firstMissing[i]);
+        std::fprintf(stderr, "\n");
     }
     gl.DebugMessageCallbackARB =
         reinterpret_cast<decltype(gl.DebugMessageCallbackARB)>(loader("glDebugMessageCallback"));

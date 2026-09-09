@@ -95,6 +95,8 @@ public:
         auto wglCreateContextAttribsARB =
             reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
                 wglGetProcAddress("wglCreateContextAttribsARB"));
+        fprintf(stderr, "[aw] wglCreateContextAttribsARB: %s\n",
+                wglCreateContextAttribsARB ? "available" : "MISSING");
         if (wglCreateContextAttribsARB) {
             const int attribs[] = {
                 WGL_CONTEXT_MAJOR_VERSION_ARB, 3,
@@ -103,6 +105,9 @@ public:
                 0
             };
             hrc_ = wglCreateContextAttribsARB(hdc_, nullptr, attribs);
+            fprintf(stderr, "[aw] GL 3.3 core context: %s\n", hrc_ ? "created" : "FAILED");
+        } else {
+            fprintf(stderr, "[aw] no ARB_create_context — cannot request GL 3.3\n");
         }
         if (hrc_) {
             wglMakeCurrent(hdc_, hrc_);
@@ -117,15 +122,17 @@ public:
             return p;
         };
         if (!loadGL(proc)) {
-            fprintf(stderr, "[aw] OpenGL 3.3 core unavailable\n");
+            fprintf(stderr, "[aw] OpenGL 3.3 core entry points unavailable\n");
+            fprintf(stderr, "[aw] -> your GPU driver is too old (needs OpenGL 3.3)\n");
             return false;
         }
 
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);
-        fprintf(stderr, "[aw] renderer: %s | %s\n",
+        fprintf(stderr, "[aw] renderer: %s | %s | GLSL %s\n",
                 gl.GetString ? (const char*)gl.GetString(GL_RENDERER) : "?",
-                gl.GetString ? (const char*)gl.GetString(GL_VERSION) : "?");
+                gl.GetString ? (const char*)gl.GetString(GL_VERSION) : "?",
+                gl.GetString ? (const char*)gl.GetString(GL_SHADING_LANGUAGE_VERSION) : "?");
         return true;
     }
 
