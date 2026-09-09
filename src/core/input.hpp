@@ -22,8 +22,9 @@ constexpr uint32_t KEY_E = 0x65, KEY_Q = 0x71;
 constexpr uint32_t KEY_R = 0x72, KEY_F = 0x66, KEY_P = 0x70, KEY_X = 0x78;
 
 // Mouse buttons (index into FrameInput::mousePressed/Released).
-constexpr int MB_LEFT = 0;
-constexpr int MB_MIDDLE = 1;
-constexpr int MB_RIGHT = 2;
+// Prefixed "MBTN_" to avoid clashing with the Windows MessageBox MB_* macros.
+constexpr int MBTN_LEFT = 0;
+constexpr int MBTN_MIDDLE = 1;
+constexpr int MBTN_RIGHT = 2;
 
 }  // namespace aw

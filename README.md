@@ -5,27 +5,79 @@ A high-performance, first-person vertical-climbing prototype inspired by
 climb it by **pulling bricks out** to make ledges and **pushing them back** in.
 The engine is written in pure C++20 with **zero third-party dependencies** — no
 physics engine, no windowing toolkit, no GL loader library. The only link-time
-dependencies are `libc`, `libm` and `libdl` (X11/GLX/OpenGL are resolved at
-runtime through `dlopen`).
+dependencies are `libc`, `libm` and `libdl` on Linux (X11/GLX/OpenGL are
+resolved at runtime through `dlopen`).
 
+---
+
+## ▶️ Get the game (Windows)
+
+A ready-to-run `atw.exe` is built automatically by GitHub Actions every time
+code is pushed.
+
+**Option A — GitHub Releases (easiest)**
+
+1. Open the repo's **Releases** page (right sidebar → *Releases*).
+2. Download **`atw.exe`** from the latest release.
+3. Double-click `atw.exe` and play.
+
+**Option B — Actions artifacts (if there's no release yet)**
+
+1. Open the repo on GitHub and click the **Actions** tab.
+2. Click the most recent **build** run (a green ✓).
+3. Scroll down to **Artifacts** and download **`against-the-wall`**.
+4. Unzip it and double-click **`atw.exe`**.
+
+> `atw.exe` is fully self-contained (x64, no install). It needs a standard
+> Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
+> AMD driver). If SmartScreen warns on first run, click **More info →
+> Run anyway**. Press `Esc` to quit.
+
+### Build the .exe yourself on Windows (optional)
+
+With [MSYS2](https://www.msys2.org/) (MINGW64 shell):
+
+```bash
+pacman -S mingw-w64-x86_64-gcc make
+make windows        # produces ./build/atw.exe
 ```
+
+### Windows via WSL2 (alternative)
+
+```bash
+sudo apt update && sudo apt install -y g++ make
+make run            # needs an X server (e.g. VcXsrv) to show the window
+```
+
+---
+
+## Linux / macOS-ish dev build
+
+```bash
 make            # builds ./build/atw and ./build/atw_tests
 make test       # run the unit tests
 make run        # launch the game (X11 + OpenGL 3.3)
 make demo       # headless benchmark/demo (no window required)
 ```
 
+or with CMake:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
 ## Requirements
 
 - **C++20 compiler** (GCC 12+ / Clang 16+ recommended).
-- For the interactive windowed mode: Linux with **X11**, **GLX** and an
-  **OpenGL 3.3 core** driver. The engine loads these at runtime, so no X11/GL
-  *development* headers are needed to build.
-- **Headless mode needs nothing** — it runs the full simulation loop with a
-  scripted camera and prints frame stats, so it works in CI or a container.
+- Interactive windowed mode needs **X11 + GLX + OpenGL 3.3** (Linux) or a
+  standard Windows GPU driver (Windows). The engine loads these at runtime, so
+  no X11/GL *development* headers are needed to build.
+- **Headless mode needs nothing** — it runs the full simulation with a scripted
+  camera and prints frame stats, so it works in CI or a container.
 
-If you run `./build/atw` on a machine without a display/GPU it automatically
-falls back to headless mode and prints a status line.
+If you run the game on a machine without a display/GPU it automatically falls
+back to headless mode and prints a status line.
 
 ## Controls
 
@@ -73,14 +125,15 @@ collision cost is effectively constant per frame.
 
 **Numbers (headless demo, 60 Hz simulated step):** 54 resident chunks =
 13,824 bricks, drawn as ≤ 54 instanced draw calls (one per visible chunk) on a
-single vertex buffer; the wall itself is one mesh. The entire binary is ~60 KB.
+single vertex buffer; the wall itself is one mesh.
 
 ## Project layout
 
 ```
 src/
   core/          math.hpp (vec/mat/frustum/ray/hash), platform abstraction,
-                 X11+GLX window backend, headless backend, input constants
+                 X11+GLX window backend, Win32+WGL window backend,
+                 headless backend, input constants
   render/        gl.h/gl.cpp (zero-dependency GL 3.3 loader),
                  renderer.hpp/.cpp (instanced bricks, sky, crosshair)
   game/          constants, grid/chunk/wall (streaming + brick store),
@@ -88,12 +141,14 @@ src/
                  game.cpp (loop + scripted demo driver)
 tests/           dependency-free unit tests (grid, store, streaming,
                  persistence, controller, interaction)
+.github/workflows/  CI: builds + tests on Linux, cross-compiles atw.exe,
+                    attaches it to releases / artifacts
 ```
 
 ## Technical notes
 
-- **Zero runtime allocations**: `valgrind`-clean hot loops by construction —
-  every container is a fixed pool (see `src/game/wall.hpp`).
+- **Zero runtime allocations**: every container is a fixed pool (see
+  `src/game/wall.hpp`).
 - **Infinite vertical wall**: brick/chunk coordinates are unbounded in Y;
   procedural appearance comes from a deterministic spatial hash, so a chunk can
   be regenerated losslessly at any time. Player modifications persist across

@@ -102,7 +102,7 @@ public:
     // Pull (extend) the target brick. Returns true if the brick changed.
     // Extending is always allowed (collision pushes/lifts the player out of the
     // way); only retraction is constrained by occupancy.
-    bool pull(Wall& wall, const Player& player, const TargetResult& t, float dt) {
+    bool pull(Wall& wall, const TargetResult& t, float dt) {
         if (!t.hit) return false;
         float d = wall.brickDepth(t.bx, t.by);
         if (d >= PULL_DEPTH - 1e-4f) {

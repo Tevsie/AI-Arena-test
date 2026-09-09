@@ -181,7 +181,7 @@ static void testInteraction() {
 
     // Pull: depth grows toward PULL_DEPTH.
     const float dt = 1.0f / 60.0f;
-    for (int i = 0; i < 60; ++i) { t = it.cast(p, w); it.pull(w, p, t, dt); }
+    for (int i = 0; i < 60; ++i) { t = it.cast(p, w); it.pull(w, t, dt); }
     CHECK_NEAR(w.brickDepth(48, 1), PULL_DEPTH, 0.02f);
     CHECK(w.brickState(48, 1) == STATE_EXTENDED);
 

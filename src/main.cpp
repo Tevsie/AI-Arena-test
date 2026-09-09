@@ -1,4 +1,12 @@
 // main.cpp — entry point for the "Against the Wall" C++20 prototype.
+#if defined(_WIN32)
+#  define WIN32_LEAN_AND_MEAN
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#endif
+
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -42,15 +50,26 @@ int main(int argc, char** argv) {
         // automatic fallback when no display/GPU is available).
         char env[32];
         std::snprintf(env, sizeof(env), "%d", frames);
+#if defined(_WIN32)
+        _putenv_s("AW_HEADLESS_FRAMES", env);
+#else
         ::setenv("AW_HEADLESS_FRAMES", env, 1);
+#endif
     }
 
     aw::Game game;
     if (!game.init("Against the Wall (C++20 prototype)", width, height, forceHeadless)) {
         fprintf(stderr, "[aw] failed to initialize\n");
+#if defined(_WIN32)
+        MessageBoxA(nullptr,
+                    "Against the Wall failed to start.\n\n"
+                    "Your system may not have an OpenGL 3.3 graphics driver.\n"
+                    "Try updating your GPU driver (Intel / NVIDIA / AMD).",
+                    "Against the Wall", MB_OK | MB_ICONERROR);
+#endif
         return 1;
     }
-    fprintf(stderr, "[aw] backend: %s\n", game.headless() ? "headless" : "x11+opengl");
+    fprintf(stderr, "[aw] backend: %s\n", game.headless() ? "headless" : "windowed");
 
     game.run();
 
@@ -64,3 +83,11 @@ int main(int argc, char** argv) {
     game.shutdown();
     return 0;
 }
+
+#if defined(_WIN32)
+// GUI-subsystem entry point (MinGW, -mwindows). __argc/__argv are supplied by
+// the MinGW C runtime; we simply forward into the standard main().
+int WINAPI WinMain(HINSTANCE, HINSTANCE, LPSTR, int) {
+    return main(__argc, __argv);
+}
+#endif

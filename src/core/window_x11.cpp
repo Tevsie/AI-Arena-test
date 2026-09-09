@@ -4,6 +4,8 @@
 //
 // If any step fails (no DISPLAY, no GLX, no GL 3.3), init() returns false and
 // the caller falls back to the headless backend.
+#if !defined(_WIN32)
+
 #include "platform.hpp"
 
 #include <dlfcn.h>
@@ -451,3 +453,5 @@ private:
 Platform* createPlatform() { return new PlatformX11(); }
 
 }  // namespace aw
+
+#endif  // !_WIN32

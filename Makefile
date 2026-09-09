@@ -26,6 +26,14 @@ $(TARGET): src/main.cpp $(CORE) $(RENDER) $(GAME) | $(BUILD)
 $(TEST): tests/tests.cpp $(CORE) $(RENDER) $(GAME) | $(BUILD)
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) -I. -o $@ $^ $(LDLIBS)
 
+# Cross-compile a native Windows .exe (requires mingw-w64; see README).
+WINDOWS_CXX ?= x86_64-w64-mingw32-g++
+windows:
+	$(WINDOWS_CXX) $(CXXFLAGS) -mwindows -static -o $(BUILD)/atw.exe \
+	  src/main.cpp src/core/window_win32.cpp src/core/window_headless.cpp \
+	  src/render/gl.cpp src/render/renderer.cpp src/game/game.cpp \
+	  -lopengl32 -lgdi32 -luser32 -static-libgcc -static-libstdc++
+
 run: $(TARGET)
 	./$(TARGET)
 
@@ -38,4 +46,4 @@ test: $(TEST)
 clean:
 	rm -rf $(BUILD)
 
-.PHONY: all run demo test clean
+.PHONY: all run demo test clean windows

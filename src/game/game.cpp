@@ -66,7 +66,7 @@ void Game::simulateFrame(const FrameInput& in, float dt) {
     player_.update(in, wall_, dt);
 
     target_ = interaction_.cast(player_, wall_);
-    if (mouseL_ && target_.hit) interaction_.pull(wall_, player_, target_, dt);
+    if (mouseL_ && target_.hit) interaction_.pull(wall_, target_, dt);
     if (mouseR_ && target_.hit) interaction_.push(wall_, player_, target_, dt);
 
     int32_t row = brickToChunk(0, floori(player_.pos.y / BRICK)).cy;
@@ -106,8 +106,8 @@ void Game::run() {
         if (!alive || in.shouldQuit) break;
 
         // Hold-state from edge events.
-        mouseL_ = (in.mousePressed[MB_LEFT] || mouseL_) && !in.mouseReleased[MB_LEFT];
-        mouseR_ = (in.mousePressed[MB_RIGHT] || mouseR_) && !in.mouseReleased[MB_RIGHT];
+        mouseL_ = (in.mousePressed[MBTN_LEFT] || mouseL_) && !in.mouseReleased[MBTN_LEFT];
+        mouseR_ = (in.mousePressed[MBTN_RIGHT] || mouseR_) && !in.mouseReleased[MBTN_RIGHT];
 
         if (headless()) demoDrive(dt);
 
