@@ -39,7 +39,7 @@ jobs:
           exit $code
 
       - name: Upload Windows build log (CI debug)
-        if: always()
+        if: failure()
         shell: bash
         run: |
           git config user.name  "CI"
