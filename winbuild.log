@@ -1,0 +1,11 @@
+src/main.cpp: In lambda function:
+src/main.cpp:35:37: warning: unused parameter ‘flag’ [-Wunused-parameter]
+   35 |         auto need = [&](const char* flag) -> const char* {
+      |                         ~~~~~~~~~~~~^~~~
+src/core/window_win32.cpp: In member function ‘virtual bool aw::PlatformWin32::init(const char*, int, int)’:
+src/core/window_win32.cpp:96:13: warning: cast between incompatible function types from ‘PROC’ {aka ‘long long int (*)()’} to ‘aw::{anonymous}::PFNWGLCREATECONTEXTATTRIBSARBPROC’ {aka ‘HGLRC__* (*)(HDC__*, HGLRC__*, const int*)’} [-Wcast-function-type]
+   96 |             reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+   97 |                 wglGetProcAddress("wglCreateContextAttribsARB"));
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+exit=0
