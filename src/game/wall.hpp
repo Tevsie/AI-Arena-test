@@ -97,6 +97,17 @@ public:
     int32_t count() const { return count_; }        // distinct bricks ever touched
     int32_t activeCount() const { return active_; } // bricks currently extended
 
+    // Forget every modification (restart). Fixed pool: just clear in place.
+    void reset() {
+        for (int32_t i = 0; i < CAP; ++i) {
+            slots_[i].key = 0;
+            slots_[i].state = uint8_t(STATE_REST);
+            slots_[i].depth = 0.0f;
+        }
+        count_ = 0;
+        active_ = 0;
+    }
+
     // Iterate all occupied slots (used when (re)computing a chunk's active count).
     template <typename F>
     void forEach(F&& f) const {
@@ -158,7 +169,7 @@ public:
         if (freeCount_ == 0) {
             // Pool exhausted: evict the furthest chunk (simple safety net; the
             // streaming window is sized so this never triggers in practice).
-            evictFurthest(c.cy);
+            evictFurthest(c.cx, c.cy);
         }
         int32_t slot = freeSlots_[--freeCount_];
         Chunk& ch = pool_[slot];
@@ -198,6 +209,17 @@ public:
 
     int32_t residentCount() const { return MAX_RESIDENT_CHUNKS - freeCount_; }
 
+    // Release every chunk and forget every brick modification (restart).
+    void reset() {
+        for (int32_t i = 0; i < MAP_CAP; ++i) map_[i].state = 0;
+        for (int32_t i = 0; i < MAX_RESIDENT_CHUNKS; ++i) {
+            freeSlots_[i] = MAX_RESIDENT_CHUNKS - 1 - i;
+            pool_[i].slot = i;
+        }
+        freeCount_ = MAX_RESIDENT_CHUNKS;
+        store_.reset();
+    }
+
     // Iterate resident chunks in stable map order (used by the renderer to
     // compact instance ranges into a single contiguous draw).
     template <typename F>
@@ -215,53 +237,70 @@ public:
         }
     }
 
-    // Make resident all chunks within ACTIVE_CHUNK_RANGE of the player's row and
-    // release the rest. Cheap when the player stays in the same chunk row.
-    void streamAround(int32_t playerCy) {
-        for (int32_t cx = 0; cx < CHUNKS_X; ++cx) {
-            for (int32_t dy = -ACTIVE_CHUNK_RANGE; dy <= ACTIVE_CHUNK_RANGE; ++dy)
-                acquire({cx, playerCy + dy});
-        }
-        // Release out-of-range residents.
+    // Make resident all chunks within ACTIVE_CHUNK_RANGE of the player's chunk
+    // (a 9x9 window in X and Y — the wall is infinite in all directions) and
+    // release the rest. Cheap when the player stays in the same chunk.
+    void streamAround(int32_t playerCx, int32_t playerCy) {
+        // Release out-of-range residents FIRST so their pool slots are free
+        // for the incoming window. (Acquiring first would force the pool's
+        // evict-on-demand path to run mid-slide, where it can evict window
+        // chunks whose turn already passed, shrinking the resident set.)
         for (int32_t i = 0; i < MAP_CAP; ++i) {
             MapEntry& e = map_[i];
             if (e.state != 1) continue;
-            if (e.cy < playerCy - ACTIVE_CHUNK_RANGE || e.cy > playerCy + ACTIVE_CHUNK_RANGE)
+            if (e.cx < playerCx - ACTIVE_CHUNK_RANGE || e.cx > playerCx + ACTIVE_CHUNK_RANGE ||
+                e.cy < playerCy - ACTIVE_CHUNK_RANGE || e.cy > playerCy + ACTIVE_CHUNK_RANGE)
                 release({e.cx, e.cy});
+        }
+        for (int32_t dx = -ACTIVE_CHUNK_RANGE; dx <= ACTIVE_CHUNK_RANGE; ++dx) {
+            for (int32_t dy = -ACTIVE_CHUNK_RANGE; dy <= ACTIVE_CHUNK_RANGE; ++dy)
+                acquire({playerCx + dx, playerCy + dy});
         }
     }
 
     // ---- brick state / geometry -------------------------------------------
+    //
+    // All brick queries take an arbitrary grid cell and canonicalize it to the
+    // containing mosaic brick's origin first, so every cell of a brick reads
+    // and writes the same state.
 
     // Current extension depth of a brick (0 if flush).
-    float brickDepth(int32_t bx, int32_t by) const { return store_.depth(bx, by); }
+    float brickDepth(int32_t bx, int32_t by) const {
+        BrickRect r = brickAt(bx, by);
+        return store_.depth(r.ox, r.oy);
+    }
     BrickState brickState(int32_t bx, int32_t by) const {
-        return static_cast<BrickState>(store_.state(bx, by));
+        BrickRect r = brickAt(bx, by);
+        return static_cast<BrickState>(store_.state(r.ox, r.oy));
     }
 
-    // World AABB of a brick, accounting for extension. A rigid unit cube that
-    // slides outward: flush occupies z in [-1, 0]; extended by depth d occupies
-    // z in [d-1, d]. Empty AABB if out of the wall's finite width.
+    // World AABB of a brick, accounting for extension. A rigid box of the
+    // brick's mosaic footprint that slides outward: flush occupies
+    // z in [-e, 0] for extent e; extended by depth d occupies z in [d-e, d].
+    // The wall is infinite and exactly tiled, so every (bx,by) cell belongs to
+    // exactly one brick.
     AABB brickAABB(int32_t bx, int32_t by) const {
-        if (bx < 0 || bx >= WALL_WIDTH_BRICKS) return AABB{{0, 0, 0}, {0, 0, 0}};
-        float d = store_.depth(bx, by);
-        float x0 = float(bx), y0 = float(by);
-        return AABB({x0, y0, -1.0f + d}, {x0 + BRICK, y0 + BRICK, d});
+        BrickRect r = brickAt(bx, by);
+        float e = brickExtent(r);
+        float d = store_.depth(r.ox, r.oy);
+        float x0 = float(r.ox), y0 = float(r.oy);
+        return AABB({x0, y0, d - e},
+                    {x0 + float(r.w), y0 + float(r.h), d});
     }
 
     // Returns the resident chunk containing brick (bx,by), or nullptr.
     Chunk* chunkAtBrick(int32_t bx, int32_t by) {
-        if (bx < 0 || bx >= WALL_WIDTH_BRICKS) return nullptr;
         return find(brickToChunk(bx, by));
     }
 
     // Record a brick modification (pull/push). Keeps the owning chunk in sync.
     void setBrick(int32_t bx, int32_t by, BrickState state, float depth) {
-        store_.set(bx, by, state, depth);
-        if (Chunk* ch = chunkAtBrick(bx, by)) {
+        BrickRect r = brickAt(bx, by);
+        store_.set(r.ox, r.oy, state, depth);
+        if (Chunk* ch = chunkAtBrick(r.ox, r.oy)) {
             ch->dirty = true;
             // Track the active-brick count incrementally (used by fast paths).
-            int32_t local = brickLocalIndex(bx, by);
+            int32_t local = brickLocalIndex(r.ox, r.oy);
             bool wasActive = ch->activeLocal[local];
             bool nowActive = (state != STATE_REST);
             if (nowActive != wasActive) {
@@ -269,6 +308,13 @@ public:
                 ch->activeCount += nowActive ? 1 : -1;
             }
         }
+    }
+
+    // Total mosaic bricks across all resident chunks (varies with the mosaic).
+    int32_t residentBrickCount() const {
+        int32_t n = 0;
+        forEachResident([&](const Chunk& ch) { n += ch.brickCount; });
+        return n;
     }
 
     BrickStore& store() { return store_; }
@@ -297,12 +343,14 @@ private:
         fprintf(stderr, "[aw] resident map exhausted\n");
     }
 
-    void evictFurthest(int32_t playerCy) {
+    void evictFurthest(int32_t playerCx, int32_t playerCy) {
         int32_t bestIdx = -1, bestDist = -1;
         for (int32_t i = 0; i < MAP_CAP; ++i) {
             MapEntry& e = map_[i];
             if (e.state != 1) continue;
-            int32_t d = e.cy - playerCy; if (d < 0) d = -d;
+            int32_t dx = e.cx - playerCx; if (dx < 0) dx = -dx;
+            int32_t dy = e.cy - playerCy; if (dy < 0) dy = -dy;
+            int32_t d = dx > dy ? dx : dy;   // Chebyshev distance on the chunk grid
             if (d > bestDist) { bestDist = d; bestIdx = i; }
         }
         if (bestIdx >= 0) release({map_[bestIdx].cx, map_[bestIdx].cy});

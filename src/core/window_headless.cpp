@@ -30,12 +30,17 @@ public:
         std::memset(in.keys, 0, sizeof(in.keys));
         in.width = width_; in.height = height_;
         in.mouseDX = 0.0f; in.mouseDY = 0.0f;
+        in.mouseX = float(width_ / 2); in.mouseY = float(height_ / 2);
         in.shouldQuit = (frame_++ >= maxFrames_);
         return !in.shouldQuit;
     }
 
     void swapBuffers() override {}
     void shutdown() override {}
+    void resize(int w, int h) override {
+        if (w > 0 && h > 0) { width_ = w; height_ = h; }
+    }
+    void setFullscreen(bool) override {}
     BackendInfo info() const override {
         BackendInfo b;
         b.hasWindow = false;

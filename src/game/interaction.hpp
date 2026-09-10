@@ -1,10 +1,13 @@
 // interaction.hpp — center-screen brick targeting (raycast) and the
-// pull/push mechanics with smooth interpolation.
+// pull/push mechanics: a mouse CLICK starts a 3-second lerp of the target
+// brick outward (pull) or back flush (push). In-flight lerps live in a small
+// fixed pool (no allocation) and are advanced once per frame by update().
 #pragma once
 
 #include <cstdint>
 
 #include "../core/math.hpp"
+#include "../audio/audio.hpp"
 #include "constants.hpp"
 #include "grid.hpp"
 #include "player.hpp"
@@ -45,11 +48,22 @@ struct TargetResult {
 
 class Interaction {
 public:
+    static constexpr int MAX_LERPS = 256;   // max simultaneous brick lerps
+
+    struct BrickLerp {
+        bool active = false;
+        int32_t bx = 0, by = 0;
+        float from = 0.0f;   // depth when the lerp started
+        float to = 0.0f;     // target depth (PULL_DEPTH out, 0 in)
+        float t = 0.0f;      // elapsed seconds (done at BRICK_LERP_TIME)
+    };
+
     // Cast the center-screen ray against the brick grid within PULL_REACH.
-    // Uses an exact 2D grid DDA over the wall's (x,y) cells; because every
-    // brick spans a full unit cell in x/y and the wall is one brick deep, each
-    // crossed cell's extended box is tested once — nothing is missed and the
-    // cost is proportional to the few cells the ray actually crosses.
+    // Uses an exact 2D grid DDA over the wall's (x,y) cells (infinite in both
+    // axes). The mosaic tiling gives every cell exactly one brick, so each
+    // stepped cell tests its containing brick and the first hit wins; cells of
+    // the same brick are contiguous along the ray and tested once. Reports the
+    // hit brick's origin.
     TargetResult cast(const Player& player, const Wall& wall) const {
         TargetResult r;
         Vec3 eye = player.eye();
@@ -66,16 +80,21 @@ public:
         float tMaxX = std::fabs(dir.x) < 1e-9f ? 1e30f : (nextX - eye.x) / dir.x;
         float tMaxY = std::fabs(dir.y) < 1e-9f ? 1e30f : (nextY - eye.y) / dir.y;
 
+        int32_t prevOx = INT32_MIN, prevOy = INT32_MIN;
         for (int i = 0; i < 64; ++i) {
-            if (c.x < 0 || c.x >= WALL_WIDTH_BRICKS) break;
-            AABB b = wall.brickAABB(c.x, c.y);
-            float tn = 0.0f;
-            if (b.mx.x > b.mn.x && rayAABB(ray, b, tn) && tn <= PULL_REACH) {
-                r.hit = true;
-                r.bx = c.x; r.by = c.y;
-                r.depth = wall.brickDepth(c.x, c.y);
-                r.dist = tn;
-                return r;
+            BrickRect rect = brickAt(c.x, c.y);
+            if (rect.ox != prevOx || rect.oy != prevOy) {
+                prevOx = rect.ox;
+                prevOy = rect.oy;
+                AABB b = wall.brickAABB(rect.ox, rect.oy);
+                float tn = 0.0f;
+                if (rayAABB(ray, b, tn) && tn <= PULL_REACH) {
+                    r.hit = true;
+                    r.bx = rect.ox; r.by = rect.oy;
+                    r.depth = wall.brickDepth(rect.ox, rect.oy);
+                    r.dist = tn;
+                    return r;
+                }
             }
             // Advance to the next cell along the nearer axis.
             if (tMaxX < tMaxY) { tMaxX += tDeltaX; c.x += stepX; }
@@ -88,47 +107,123 @@ public:
     // retraction would drop the player). A brick the player merely touches with
     // their body is NOT occupied.
     bool isOccupied(const Player& player, const Wall& wall, int32_t bx, int32_t by) const {
-        AABB b = wall.brickAABB(bx, by);
-        if (b.mx.z <= b.mn.z) return false;
+        BrickRect rect = brickAt(bx, by);
+        AABB b = wall.brickAABB(rect.ox, rect.oy);
         // The player's feet box.
         AABB feet{{player.pos.x - PLAYER_HALF_W, player.pos.y - 0.05f, player.pos.z - PLAYER_HALF_W},
                   {player.pos.x + PLAYER_HALF_W, player.pos.y + 0.02f, player.pos.z + PLAYER_HALF_W}};
-        // The brick's top face (a thin slab at y = by+1).
-        AABB top{{float(bx), float(by) + BRICK - 0.02f, b.mn.z},
-                 {float(bx) + BRICK, float(by) + BRICK + 0.02f, b.mx.z}};
+        // The brick's top face (a thin slab at y = oy+h).
+        AABB top{{float(rect.ox), float(rect.oy + rect.h) - 0.02f, b.mn.z},
+                 {float(rect.ox + rect.w), float(rect.oy + rect.h) + 0.02f, b.mx.z}};
         return feet.overlaps(top);
     }
 
-    // Pull (extend) the target brick. Returns true if the brick changed.
-    // Extending is always allowed (collision pushes/lifts the player out of the
-    // way); only retraction is constrained by occupancy.
-    bool pull(Wall& wall, const TargetResult& t, float dt) {
+    // True while the brick has an in-flight lerp.
+    bool isLerping(int32_t bx, int32_t by) const {
+        for (int i = 0; i < MAX_LERPS; ++i) {
+            const BrickLerp& L = lerps_[i];
+            if (L.active && L.bx == bx && L.by == by) return true;
+        }
+        return false;
+    }
+
+    int activeLerps() const {
+        int n = 0;
+        for (int i = 0; i < MAX_LERPS; ++i)
+            if (lerps_[i].active) ++n;
+        return n;
+    }
+
+    // Cancel every in-flight lerp (restart).
+    void clear() {
+        for (int i = 0; i < MAX_LERPS; ++i) lerps_[i].active = false;
+    }
+
+    // Optional sound effects (null = silent, e.g. tests/headless dummy).
+    void setAudio(Audio* audio) { audio_ = audio; }
+
+    // Pull (extend) the target brick: starts a 3 s lerp outward. Clicking a
+    // brick that is already lerping retargets it smoothly from its current
+    // depth (so a mid-retract click reverses back out). Returns true if a lerp
+    // was started. Extending is always allowed (collision pushes/lifts the
+    // player out of the way); only retraction is constrained by occupancy.
+    bool pull(Wall& wall, const TargetResult& t) {
         if (!t.hit) return false;
         float d = wall.brickDepth(t.bx, t.by);
-        if (d >= PULL_DEPTH - 1e-4f) {
+        if (d >= PULL_DEPTH - 1e-4f && !isLerping(t.bx, t.by)) {
             if (wall.brickState(t.bx, t.by) != STATE_EXTENDED)
                 wall.setBrick(t.bx, t.by, STATE_EXTENDED, PULL_DEPTH);
             return false;
         }
-        float nd = d + PULL_SPEED * dt;
-        if (nd > PULL_DEPTH) nd = PULL_DEPTH;
-        BrickState s = nd >= PULL_DEPTH - 1e-4f ? STATE_EXTENDED : STATE_EXTENDING;
-        wall.setBrick(t.bx, t.by, s, nd);
+        startLerp(t.bx, t.by, d, PULL_DEPTH);
+        wall.setBrick(t.bx, t.by, STATE_EXTENDING, d);
+        if (audio_) audio_->play(Sfx::Pull);
         return true;
     }
 
-    // Push (retract) the target brick. Returns true if the brick changed.
-    bool push(Wall& wall, const Player& player, const TargetResult& t, float dt) {
+    // Push (retract) the target brick: starts a 3 s lerp back flush. Refused
+    // while the player stands on the brick. Returns true if a lerp was started.
+    bool push(Wall& wall, const Player& player, const TargetResult& t) {
         if (!t.hit) return false;
         if (isOccupied(player, wall, t.bx, t.by)) return false;
         float d = wall.brickDepth(t.bx, t.by);
-        if (d <= 1e-4f) return false;
-        float nd = d - PULL_SPEED * dt;
-        if (nd < 0.0f) nd = 0.0f;
-        BrickState s = nd <= 1e-4f ? STATE_REST : STATE_RETRACTING;
-        wall.setBrick(t.bx, t.by, s, nd);
+        if (d <= 1e-4f && !isLerping(t.bx, t.by)) return false;
+        startLerp(t.bx, t.by, d, 0.0f);
+        wall.setBrick(t.bx, t.by, STATE_RETRACTING, d);
+        if (audio_) audio_->play(Sfx::Push);
         return true;
     }
+
+    // Advance all in-flight lerps by dt (call once per frame). Each lerp moves
+    // its brick linearly from `from` to `to` over BRICK_LERP_TIME seconds. A
+    // retracting brick pauses while the player stands on it and resumes when
+    // they step off.
+    void update(Wall& wall, const Player& player, float dt) {
+        for (int i = 0; i < MAX_LERPS; ++i) {
+            BrickLerp& L = lerps_[i];
+            if (!L.active) continue;
+            if (L.to < L.from && isOccupied(player, wall, L.bx, L.by)) continue;
+            L.t += dt;
+            float k = L.t >= BRICK_LERP_TIME ? 1.0f : (L.t / BRICK_LERP_TIME);
+            float nd = L.from + (L.to - L.from) * k;
+            if (k >= 1.0f) {
+                L.active = false;
+                BrickState s = L.to <= 1e-4f ? STATE_REST : STATE_EXTENDED;
+                wall.setBrick(L.bx, L.by, s, L.to);
+                if (audio_) audio_->play(Sfx::Done);
+            } else {
+                BrickState s = (L.to > L.from) ? STATE_EXTENDING : STATE_RETRACTING;
+                wall.setBrick(L.bx, L.by, s, nd);
+            }
+        }
+    }
+
+private:
+    void startLerp(int32_t bx, int32_t by, float from, float to) {
+        // Retarget an in-flight lerp on the same brick (smooth reversal).
+        for (int i = 0; i < MAX_LERPS; ++i) {
+            BrickLerp& L = lerps_[i];
+            if (L.active && L.bx == bx && L.by == by) {
+                L.from = from; L.to = to; L.t = 0.0f;
+                return;
+            }
+        }
+        // Otherwise grab a free slot (steal slot 0 if the pool is exhausted).
+        for (int i = 0; i < MAX_LERPS; ++i) {
+            BrickLerp& L = lerps_[i];
+            if (!L.active) {
+                L.active = true; L.bx = bx; L.by = by;
+                L.from = from; L.to = to; L.t = 0.0f;
+                return;
+            }
+        }
+        BrickLerp& L = lerps_[0];
+        L.active = true; L.bx = bx; L.by = by;
+        L.from = from; L.to = to; L.t = 0.0f;
+    }
+
+    BrickLerp lerps_[MAX_LERPS]{};
+    Audio* audio_ = nullptr;
 };
 
 }  // namespace aw

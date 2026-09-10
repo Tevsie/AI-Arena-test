@@ -5,8 +5,9 @@
 
 namespace aw {
 
-// Brick grid: 1.0 unit cubes; the wall face lies in the XY plane at z=0 and
+// Brick grid: 1.0 unit cells; the wall face lies in the XY plane at z=0 and
 // bricks extend +Z (outward). The wall plane is vertical, gravity is -Y.
+// The wall is infinite in both X (horizontal) and Y (vertical).
 constexpr float BRICK = 1.0f;
 
 // Chunk grid: CHUNK_X x CHUNK_Y bricks per chunk (one brick deep). Chunks are
@@ -16,20 +17,30 @@ constexpr int32_t CHUNK_Y = 16;
 constexpr int32_t CHUNK_BRICKS = CHUNK_X * CHUNK_Y;          // 256 bricks / chunk
 constexpr float CHUNK_WORLD_W = float(CHUNK_X) * BRICK;      // 16 m
 constexpr float CHUNK_WORLD_H = float(CHUNK_Y) * BRICK;      // 16 m
-constexpr int32_t WALL_WIDTH_BRICKS = 96;                    // total wall width (fixed)
-constexpr int32_t CHUNKS_X = WALL_WIDTH_BRICKS / CHUNK_X;    // 6 chunks wide
-
-// Streaming window (in chunk rows). Only chunks within this distance of the
-// player's current chunk are resident; everything else is unloaded.
-constexpr int32_t ACTIVE_CHUNK_RANGE = 4;                    // rows above/below player
+// Streaming window (in chunks). Only chunks within this distance of the
+// player's current chunk are resident; everything else is unloaded. The
+// resident set is a 9x9 window centered on the player (infinite wall).
+constexpr int32_t ACTIVE_CHUNK_RANGE = 4;                    // chunks above/below/left/right of player
 constexpr int32_t RESIDENT_ROWS = ACTIVE_CHUNK_RANGE * 2 + 1; // 9 rows resident
-constexpr int32_t MAX_RESIDENT_CHUNKS = RESIDENT_ROWS * CHUNKS_X;  // 54 chunks
-constexpr int32_t MAX_RESIDENT_BRICKS = MAX_RESIDENT_CHUNKS * CHUNK_BRICKS;  // 13,824
+constexpr int32_t RESIDENT_COLS = ACTIVE_CHUNK_RANGE * 2 + 1; // 9 columns resident
+constexpr int32_t MAX_RESIDENT_CHUNKS = RESIDENT_ROWS * RESIDENT_COLS;  // 81 chunks
+constexpr int32_t MAX_RESIDENT_BRICKS = MAX_RESIDENT_CHUNKS * CHUNK_BRICKS;  // 20,736
+
+// Brick mosaic: each chunk is tiled by non-overlapping rectangular bricks
+// (see brickAt() in grid.hpp). Bricks are between 1x1 and 4x4 cells, fully
+// contained in their chunk, and every grid cell belongs to exactly one brick,
+// so spawned bricks never overlap or leave gaps. Depth extent behind the wall
+// face equals the brick's larger footprint edge (1..4 m).
+constexpr int32_t MOSAIC_CELLS = 4;      // macro-cell edge (cells); chunk = 4x4 macros
+constexpr int32_t BRICK_MAX_W = 4;       // widest brick footprint (cells)
+constexpr int32_t BRICK_MAX_H = 4;       // tallest brick footprint (cells)
+constexpr float BRICK_MAX_EXTENT = 4.0f; // deepest brick body behind the face (m)
+constexpr int32_t BRICK_MAX_CELLS = 4;   // cell reach for grid-window queries
 
 // Interaction
 constexpr float PULL_REACH = 6.5f;       // max distance for brick targeting
 constexpr float PULL_DEPTH = 0.65f;      // max extension of a pulled brick (+Z)
-constexpr float PULL_SPEED = 3.4f;       // units/sec of extension while animating
+constexpr float BRICK_LERP_TIME = 3.0f;  // seconds for a click-triggered in/out lerp
 
 // Player
 constexpr float EYE_HEIGHT = 1.62f;      // camera height above feet

@@ -14,6 +14,10 @@ struct FrameInput {
     uint8_t keys[512]{};
     // Mouse delta since the last frame (pixels).
     float mouseDX = 0.0f, mouseDY = 0.0f;
+    // Absolute cursor position in pixels (top-left origin). Updated from motion
+    // and button events; used by the settings menu (meaningful when the cursor
+    // is not captured for FPS look).
+    float mouseX = 0.0f, mouseY = 0.0f;
     // Per-frame button events (edge triggered, not held state).
     bool mousePressed[8]{};
     bool mouseReleased[8]{};
@@ -46,6 +50,13 @@ public:
 
     // Hide/release the mouse cursor (look capture).
     virtual void setCursorCaptured(bool captured) = 0;
+
+    // Resize the window client area (used by the resolution setting). The new
+    // size is reported back through FrameInput in subsequent frames.
+    virtual void resize(int width, int height) = 0;
+
+    // Borderless fullscreen toggle (used by the fullscreen setting).
+    virtual void setFullscreen(bool on) = 0;
 
     // GL function loading (no-op on headless). Returns nullptr if not loaded.
     virtual void* loadGLProc(const char* name) = 0;

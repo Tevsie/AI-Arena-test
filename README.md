@@ -31,7 +31,8 @@ code is pushed.
 > `atw.exe` is fully self-contained (x64, no install). It needs a standard
 > Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
 > AMD driver). If SmartScreen warns on first run, click **More info →
-> Run anyway**. Press `Esc` to quit.
+> Run anyway**. Press `Esc` for the settings menu (volume, resolution, fullscreen,
+> sensitivity, restart, quit).
 
 ### Build the .exe yourself on Windows (optional)
 
@@ -86,12 +87,30 @@ back to headless mode and prints a status line.
 | Mouse            | Look around                             |
 | `W A S D`        | Move                                    |
 | `Space`          | Jump                                    |
-| **Left mouse**   | **Pull** target brick outward (ledge)   |
-| **Right mouse**  | **Push** target brick back flush        |
-| `Esc`            | Quit                                    |
+| **Left mouse**   | **Pull** target brick outward (click, 3 s lerp) |
+| **Right mouse**  | **Push** target brick back flush (click, 3 s lerp) |
+| `Esc`            | Settings menu (pause)                   |
 
 The center-screen crosshair turns **green** when a brick is in reach. You
 cannot push a brick you are currently standing on.
+
+## Settings (`Esc`)
+
+The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
+
+| Setting              | What it does                                              |
+|----------------------|-----------------------------------------------------------|
+| Master volume bar    | 0–100 % loudness for all procedural sound effects         |
+| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440  |
+| Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
+| Fullscreen           | Borderless fullscreen toggle (`ON` / `OFF`)               |
+| **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
+| Resume / Quit        | Close the menu / exit the game                            |
+
+Settings apply instantly and persist to `settings.cfg` next to the executable.
+Sound effects (brick pull/push, jump, land, UI clicks) are synthesized live —
+no audio files needed. Output uses WinMM on Windows and PulseAudio (with an
+ALSA fallback) on Linux; with no audio device the game simply runs silent.
 
 ## How it works (performance architecture)
 
@@ -115,7 +134,7 @@ are ever re-uploaded.
 matrix and drops entire chunks that are off-screen (behind the camera, above/
 below the frustum, or beyond the far plane) before issuing any draw call.
 Distance-based LOD fades far bricks to a flat shade and fog-recedes distant
-geometry in the shader. Chunk streaming keeps only a 9-row band of chunks
+geometry in the shader. Chunk streaming keeps only a 9×9 window of chunks
 resident around the player — the rest are unloaded instantly.
 
 **Custom physics.** A sub-stepped kinematic character controller resolves
@@ -123,8 +142,8 @@ collisions against grid-aligned brick AABBs with axis-by-axis push-out — no
 external engine. Candidate bricks are a tiny grid window around the player, so
 collision cost is effectively constant per frame.
 
-**Numbers (headless demo, 60 Hz simulated step):** 54 resident chunks =
-13,824 bricks, drawn as ≤ 54 instanced draw calls (one per visible chunk) on a
+**Numbers (headless demo, 60 Hz simulated step):** 81 resident chunks =
+20,736 bricks, drawn as ≤ 81 instanced draw calls (one per visible chunk) on a
 single vertex buffer; the wall itself is one mesh.
 
 ## Project layout
@@ -135,10 +154,13 @@ src/
                  X11+GLX window backend, Win32+WGL window backend,
                  headless backend, input constants
   render/        gl.h/gl.cpp (zero-dependency GL 3.3 loader),
-                 renderer.hpp/.cpp (instanced bricks, sky, crosshair)
+                 renderer.hpp/.cpp (instanced bricks, sky, crosshair, UI overlay),
+                 font.hpp (embedded 5x7 menu font)
   game/          constants, grid/chunk/wall (streaming + brick store),
                  player (kinematic controller), interaction (raycast pull/push),
-                 game.cpp (loop + scripted demo driver)
+                 settings (volume/resolution/sensitivity/fullscreen + persistence),
+                 menu (pause/settings overlay), game.cpp (loop + demo driver)
+  audio/         procedural SFX mixer + synth, WinMM / PulseAudio / ALSA backends
 tests/           dependency-free unit tests (grid, store, streaming,
                  persistence, controller, interaction)
 .github/workflows/  CI: builds + tests on Linux, cross-compiles atw.exe,
@@ -149,10 +171,13 @@ tests/           dependency-free unit tests (grid, store, streaming,
 
 - **Zero runtime allocations**: every container is a fixed pool (see
   `src/game/wall.hpp`).
-- **Infinite vertical wall**: brick/chunk coordinates are unbounded in Y;
-  procedural appearance comes from a deterministic spatial hash, so a chunk can
-  be regenerated losslessly at any time. Player modifications persist across
-  unload/reload via the persistent brick store.
+- **Infinite wall in all directions**: brick/chunk coordinates are unbounded
+  in X and Y; procedural appearance (including the non-overlapping brick
+  mosaic: 1×1..4×4 m bricks from 8 deterministic tiling patterns) comes from
+  a deterministic spatial hash, so a chunk can be regenerated losslessly at
+  any time. Player
+  modifications persist across unload/reload via the persistent brick store.
+- **No fall respawn**: falling means falling forever (streaming follows you).
 - **Deterministic demos**: `make demo` (or `./build/atw --headless --frames N`)
   steps at a fixed 60 Hz and prints `fps / frame ms / chunks / instances /
   modified bricks / peak height` every second.

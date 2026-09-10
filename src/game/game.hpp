@@ -4,12 +4,15 @@
 
 #include <cstdint>
 
+#include "../audio/audio.hpp"
 #include "../core/math.hpp"
 #include "../core/platform.hpp"
 #include "../render/renderer.hpp"
 #include "constants.hpp"
 #include "interaction.hpp"
+#include "menu.hpp"
 #include "player.hpp"
+#include "settings.hpp"
 #include "wall.hpp"
 
 namespace aw {
@@ -38,6 +41,10 @@ public:
     // Advance the simulation only (no platform/render). Testable entry point.
     void simulateFrame(const FrameInput& in, float dt);
 
+    // Restart the run: clears all brick modifications, cancels lerps, reseeds
+    // the starting platform and respawns the player (settings are kept).
+    void restart();
+
     FrameStats stats() const { return stats_; }
 
     // Headless/demo mode flag.
@@ -47,22 +54,28 @@ public:
     Wall& wall() { return wall_; }
     Player& player() { return player_; }
     Interaction& interaction() { return interaction_; }
+    Settings& settings() { return settings_; }
+    Menu& menu() { return menu_; }
 
 private:
     void demoDrive(float dt);
+    float seedWorld();   // (re)builds the starting platform; returns its top
 
     Platform* platform_ = nullptr;
     Wall wall_;
     Player player_;
     Interaction interaction_;
     Renderer renderer_;
+    Settings settings_;
+    Audio audio_;
+    Menu menu_;
     FrameStats stats_;
 
-    bool mouseL_ = false, mouseR_ = false;
     double lastTime_ = 0.0;
-    int32_t lastChunkRow_ = 0;
-    int32_t lastLedgeY_ = 0;
+    ChunkCoord lastChunk_{0, 0};
     bool initialized_ = false;
+    bool menuOpen_ = false;
+    bool prevEsc_ = false;
     TargetResult target_;
 };
 

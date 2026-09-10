@@ -32,7 +32,8 @@ jobs:
           x86_64-w64-mingw32-g++ -std=c++20 -O3 -ffast-math -Wall -Wextra -mwindows -static \
             -o atw.exe src/main.cpp src/core/window_win32.cpp src/core/window_headless.cpp \
             src/render/gl.cpp src/render/renderer.cpp src/game/game.cpp \
-            -lopengl32 -lgdi32 -luser32 -static-libgcc -static-libstdc++ > winbuild.log 2>&1
+            src/audio/audio.cpp src/audio/audio_win32.cpp \
+            -lopengl32 -lgdi32 -luser32 -lwinmm -static-libgcc -static-libstdc++ > winbuild.log 2>&1
           code=$?
           cat winbuild.log
           echo "exit=$code" >> winbuild.log

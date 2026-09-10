@@ -24,6 +24,7 @@ public:
     bool grounded = false;
     float yaw = 0.0f;               // radians; 0 = looking along +Z (into the wall)
     float pitch = 0.0f;
+    float sensitivity = 1.0f;       // mouse look multiplier (settings)
     int32_t highestBrickY = 0;      // peak reached (for stats)
 
     void reset(float x, float y, float z) {
@@ -46,8 +47,8 @@ public:
     }
 
     void look(float dx, float dy) {
-        yaw -= dx * MOUSE_SENS;
-        pitch -= dy * MOUSE_SENS;
+        yaw -= dx * MOUSE_SENS * sensitivity;
+        pitch -= dy * MOUSE_SENS * sensitivity;
         constexpr float lim = 1.55f;
         if (pitch > lim) pitch = lim;
         if (pitch < -lim) pitch = -lim;
@@ -117,11 +118,9 @@ public:
         int32_t by = floori(pos.y / BRICK);
         if (by > highestBrickY) highestBrickY = by;
 
-        // ---- fall safety (respawn on top of the wall) ----------------------
-        if (pos.y < -30.0f) {
-            reset(48.0f, 2.0f, 0.5f);
-            wall.streamAround(0);
-        }
+        // No fall respawn: if the player falls they keep falling forever. The
+        // wall is infinite and chunk streaming follows the player, so there
+        // is always wall alongside (and any protruding ledge can break a fall).
     }
 
 private:
@@ -132,10 +131,14 @@ private:
         grounded = false;
         AABB pb = box();
 
-        // Candidate brick grid window (expanded by one cell in every direction).
-        int32_t x0 = floori(pb.mn.x / BRICK) - 1;
+        // Candidate brick grid window. Mosaic bricks are up to BRICK_MAX_CELLS
+        // wide, so a brick overlapping the player may originate that many
+        // cells in -X/-Y; +1 cell of margin covers +X/+Y. Each cell resolves
+        // to its containing brick (wall.brickAABB canonicalizes), so bricks
+        // spanning several cells are simply tested more than once.
+        int32_t x0 = floori(pb.mn.x / BRICK) - BRICK_MAX_CELLS;
         int32_t x1 = floori(pb.mx.x / BRICK) + 1;
-        int32_t y0 = floori(pb.mn.y / BRICK) - 1;
+        int32_t y0 = floori(pb.mn.y / BRICK) - BRICK_MAX_CELLS;
         int32_t y1 = floori(pb.mx.y / BRICK) + 1;
 
         for (int pass = 0; pass < 3; ++pass) {

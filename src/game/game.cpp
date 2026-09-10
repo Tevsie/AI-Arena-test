@@ -16,6 +16,15 @@ static double nowSeconds() {
 }
 
 bool Game::init(const char* title, int width, int height, bool preferHeadless) {
+    // Saved settings (if any) override the requested window size.
+    if (settings_.load()) {
+        width = settings_.width;
+        height = settings_.height;
+    } else {
+        settings_.width = width;
+        settings_.height = height;
+    }
+
     if (!preferHeadless) {
         platform_ = createPlatform();
         if (platform_->init(title, width, height)) goto platformReady;
@@ -30,17 +39,18 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
         return false;
     }
 platformReady:;
+    if (settings_.fullscreen) platform_->setFullscreen(true);
 
-    // Seed the world: a starting platform the player stands on.
-    for (int32_t bx = 44; bx <= 51; ++bx)
-        wall_.setBrick(bx, -1, STATE_EXTENDED, 1.0f);
-    // A short pre-built step path so the scene has visible ledges immediately.
-    for (int32_t i = 0; i < 5; ++i)
-        wall_.setBrick(48 + (i % 3), i, STATE_EXTENDED, 0.85f);
+    float platformTop = seedWorld();
+    player_.reset(48.0f, platformTop + 0.1f, 0.5f);
+    player_.sensitivity = settings_.sensitivity;
+    lastChunk_ = brickToChunk(48, floori(platformTop));
+    wall_.streamAround(lastChunk_.cx, lastChunk_.cy);
 
-    player_.reset(48.0f, 0.0f, 0.5f);
-    lastChunkRow_ = brickToChunk(0, 0).cy;
-    wall_.streamAround(lastChunkRow_);
+    audio_.init(!headless());
+    audio_.setVolume(settings_.volume);
+    interaction_.setAudio(&audio_);
+    if (!headless()) fprintf(stderr, "[aw] audio: %s\n", audio_.backendName());
 
     if (!headless()) {
         if (!renderer_.init()) {
@@ -54,7 +64,36 @@ platformReady:;
     return true;
 }
 
+float Game::seedWorld() {
+    // A starting platform the player stands on.
+    float platformTop = 0.0f;
+    for (int32_t bx = 44; bx <= 51; ++bx) {
+        wall_.setBrick(bx, -1, STATE_EXTENDED, 1.0f);
+        float top = wall_.brickAABB(bx, -1).mx.y;
+        if (top > platformTop) platformTop = top;
+    }
+    // A short pre-built step path so the scene has visible ledges immediately.
+    for (int32_t i = 0; i < 5; ++i)
+        wall_.setBrick(48 + (i % 3), i, STATE_EXTENDED, 0.85f);
+    return platformTop;
+}
+
+void Game::restart() {
+    wall_.reset();
+    interaction_.clear();
+    float platformTop = seedWorld();
+    player_.reset(48.0f, platformTop + 0.1f, 0.5f);
+    player_.highestBrickY = 0;
+    lastChunk_ = brickToChunk(48, floori(platformTop));
+    wall_.streamAround(lastChunk_.cx, lastChunk_.cy);
+    stats_ = FrameStats{};
+    target_ = TargetResult{};
+    audio_.play(Sfx::Restart);
+}
+
 void Game::shutdown() {
+    settings_.save();
+    audio_.shutdown();
     renderer_.shutdown();
     if (platform_) { platform_->shutdown(); delete platform_; platform_ = nullptr; }
     initialized_ = false;
@@ -63,20 +102,24 @@ void Game::shutdown() {
 // Advance the simulation by dt with the given input, without touching the
 // platform or renderer. Used by tests and by run() (which supplies real input).
 void Game::simulateFrame(const FrameInput& in, float dt) {
+    player_.sensitivity = settings_.sensitivity;
     player_.update(in, wall_, dt);
 
     target_ = interaction_.cast(player_, wall_);
-    if (mouseL_ && target_.hit) interaction_.pull(wall_, target_, dt);
-    if (mouseR_ && target_.hit) interaction_.push(wall_, player_, target_, dt);
+    // Clicks (edge events) start 3 s in/out lerps; update() advances them.
+    if (in.mousePressed[MBTN_LEFT] && target_.hit) interaction_.pull(wall_, target_);
+    if (in.mousePressed[MBTN_RIGHT] && target_.hit) interaction_.push(wall_, player_, target_);
+    interaction_.update(wall_, player_, dt);
 
-    int32_t row = brickToChunk(0, floori(player_.pos.y / BRICK)).cy;
-    if (row != lastChunkRow_) {
-        lastChunkRow_ = row;
-        wall_.streamAround(row);
+    BrickCoord pb = worldToBrick(player_.pos);
+    ChunkCoord pc = brickToChunk(pb.x, pb.y);
+    if (pc != lastChunk_) {
+        lastChunk_ = pc;
+        wall_.streamAround(pc.cx, pc.cy);
     }
 
     stats_.residentChunks = wall_.residentCount();
-    stats_.drawnInstances = wall_.residentCount() * CHUNK_BRICKS;
+    stats_.drawnInstances = wall_.residentBrickCount();
     stats_.modifiedBricks = wall_.store().activeCount();
     stats_.playerBrickY = floori(player_.pos.y / BRICK);
 }
@@ -105,13 +148,44 @@ void Game::run() {
         bool alive = platform_->frame(in);
         if (!alive || in.shouldQuit) break;
 
-        // Hold-state from edge events.
-        mouseL_ = (in.mousePressed[MBTN_LEFT] || mouseL_) && !in.mouseReleased[MBTN_LEFT];
-        mouseR_ = (in.mousePressed[MBTN_RIGHT] || mouseR_) && !in.mouseReleased[MBTN_RIGHT];
+        // Esc toggles the settings menu (real window only: windowed or
+        // fullscreen); the simulation pauses while it is open.
+        bool esc = in.keys[KEY_ESC] != 0;
+        if (esc && !prevEsc_ && !headless()) {
+            menuOpen_ = !menuOpen_;
+            if (menuOpen_) menu_.open();
+            else settings_.save();
+            platform_->setCursorCaptured(!menuOpen_);
+        }
+        prevEsc_ = esc;
 
-        if (headless()) demoDrive(dt);
+        if (menuOpen_) {
+            menu_.update(in, settings_, audio_, *platform_);
+            if (menu_.consumeRestart()) {
+                restart();
+                menuOpen_ = false;
+                settings_.save();
+                platform_->setCursorCaptured(true);
+            }
+            if (menu_.consumeResume()) {
+                menuOpen_ = false;
+                settings_.save();
+                platform_->setCursorCaptured(true);
+            }
+            if (menu_.consumeQuit()) {
+                settings_.save();
+                break;
+            }
+        } else {
+            if (headless()) demoDrive(dt);
 
-        simulateFrame(in, dt);
+            bool wasGrounded = player_.grounded;
+            simulateFrame(in, dt);
+            if (!headless()) {
+                if (wasGrounded && in.keys[KEY_SPACE]) audio_.play(Sfx::Jump);
+                if (!wasGrounded && player_.grounded) audio_.play(Sfx::Land);
+            }
+        }
 
         if (!headless()) {
             float aspect = in.width > 0 && in.height > 0 ? float(in.width) / float(in.height)
@@ -122,6 +196,11 @@ void Game::run() {
             Mat4 vp = proj * view;
             stats_.drawnInstances =
                 renderer_.render(wall_, player_, vp, aspect, in.width, in.height, target_.hit);
+            if (menuOpen_) {
+                renderer_.uiBegin(in.width, in.height);
+                menu_.render(renderer_);
+                renderer_.uiEnd();
+            }
             platform_->swapBuffers();
         }
 
@@ -155,14 +234,28 @@ void Game::demoDrive(float dt) {
 
     int32_t tick = stats_.frame;
 
-    // Climb one brick every 24 frames (~2.5 bricks/sec); snap onto the ledge so
-    // the controller rests on it (grounded) between steps.
-    if (tick % 24 == 0 && tick > 0) {
-        int32_t ny = lastLedgeY_ + 1;
-        wall_.setBrick(48, ny - 1, STATE_EXTENDED, 1.0f);
-        player_.pos.y = float(ny);
+    // Climb one ledge every 12 frames; extend the brick at the player's feet
+    // and snap onto the tallest extended ledge overlapping the footprint so
+    // the controller rests on it (grounded) between steps. Mosaic bricks are
+    // 1..4 m tall and extended towers can stack above the new brick, so the
+    // support height is measured over a vertical window (not assumed): the
+    // 12-frame cadence keeps falls between snaps (~0.4 m) below the minimum
+    // 1 m step gain, which keeps the climb monotonic.
+    if (tick % 12 == 0 && tick > 0) {
+        int32_t row = floori(player_.pos.y / BRICK);
+        wall_.setBrick(48, row, STATE_EXTENDED, 1.0f);
+        float top = wall_.brickAABB(48, row).mx.y;
+        for (int32_t bx = 43; bx <= 48; ++bx) {
+            for (int32_t by = row - 5; by <= row + 8; ++by) {
+                if (wall_.brickDepth(bx, by) <= 0.0f) continue;  // flush: no z overlap
+                AABB b = wall_.brickAABB(bx, by);
+                if (b.mx.x > 48.0f - PLAYER_HALF_W && b.mn.x < 48.0f + PLAYER_HALF_W &&
+                    b.mx.y > top)
+                    top = b.mx.y;
+            }
+        }
+        player_.pos = {48.0f, top, 0.5f};
         player_.vel = {0, 0, 0};
-        lastLedgeY_ = ny;
     }
 
     if (tick % 20 == 0) {

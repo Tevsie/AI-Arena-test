@@ -52,6 +52,8 @@ using XPendingFn = int (*)(Display*);
 using XLookupKeysymFn = KeySym (*)(void*, int);
 using XKeysymToKeycodeFn = unsigned (*)(Display*, KeySym);
 using XWarpPointerFn = int (*)(Display*, Window, Window, int, int, unsigned, unsigned, int, int);
+using XResizeWindowFn = int (*)(Display*, Window, unsigned, unsigned);
+using XSendEventFn = int (*)(Display*, Window, int, long, XEvent*);
 using XQueryPointerFn = int (*)(Display*, Window, Window*, Window*, int*, int*, int*, int*, unsigned*);
 using XGrabPointerFn = int (*)(Display*, Window, int, unsigned, int, int, Window, Cursor, Time);
 using XUngrabPointerFn = int (*)(Display*, Time);
@@ -137,6 +139,8 @@ struct XLib {
     x11::XLookupKeysymFn XLookupKeysym = nullptr;
     x11::XKeysymToKeycodeFn XKeysymToKeycode = nullptr;
     x11::XWarpPointerFn XWarpPointer = nullptr;
+    x11::XResizeWindowFn XResizeWindow = nullptr;
+    x11::XSendEventFn XSendEvent = nullptr;
     x11::XQueryPointerFn XQueryPointer = nullptr;
     x11::XGrabPointerFn XGrabPointer = nullptr;
     x11::XUngrabPointerFn XUngrabPointer = nullptr;
@@ -179,6 +183,8 @@ struct XLib {
         LD(hX11, XLookupKeysym, "XLookupKeysym");
         LD(hX11, XKeysymToKeycode, "XKeysymToKeycode");
         LD(hX11, XWarpPointer, "XWarpPointer");
+        LD(hX11, XResizeWindow, "XResizeWindow");
+        LD(hX11, XSendEvent, "XSendEvent");
         LD(hX11, XQueryPointer, "XQueryPointer");
         LD(hX11, XGrabPointer, "XGrabPointer");
         LD(hX11, XUngrabPointer, "XUngrabPointer");
@@ -231,11 +237,19 @@ struct XMotionEvent { int type; unsigned long serial; int send_event; x11::Displ
 
 constexpr int KeyPress = 2, KeyRelease = 3, ButtonPress = 4, ButtonRelease = 5, MotionNotify = 6;
 constexpr int ClientMessage = 33;
+constexpr int ConfigureNotify = 22;
 
 // XClientMessageEvent ABI (only the fields we read).
 struct XClientMessageEvent {
     int type; unsigned long serial; int send_event; x11::Display* display;
     x11::Window window; x11::Atom message_type; int format; long data[5];
+};
+
+// XConfigureEvent ABI (window resize/move; only width/height are read).
+struct XConfigureEvent {
+    int type; unsigned long serial; int send_event; x11::Display* display;
+    x11::Window event, window; int x, y, width, height, border_width;
+    x11::Window above; int override_redirect;
 };
 
 }  // namespace
@@ -245,6 +259,7 @@ class PlatformX11 final : public Platform {
 public:
     bool init(const char* title, int w, int h) override {
         width_ = w; height_ = h;
+        mouseX_ = w / 2; mouseY_ = h / 2;
         if (!x_.loadAll()) return false;
 
         dpy_ = x_.XOpenDisplay(nullptr);
@@ -342,16 +357,19 @@ public:
                 }
                 case ButtonPress: {
                     auto* be = reinterpret_cast<XButtonEvent*>(evbuf);
+                    mouseX_ = be->x; mouseY_ = be->y;
                     if (be->button >= 1 && be->button <= 8) in.mousePressed[be->button - 1] = true;
                     break;
                 }
                 case ButtonRelease: {
                     auto* be = reinterpret_cast<XButtonEvent*>(evbuf);
+                    mouseX_ = be->x; mouseY_ = be->y;
                     if (be->button >= 1 && be->button <= 8) in.mouseReleased[be->button - 1] = true;
                     break;
                 }
                 case MotionNotify: {
                     auto* me = reinterpret_cast<XMotionEvent*>(evbuf);
+                    mouseX_ = me->x; mouseY_ = me->y;
                     if (captured_) {
                         int cx = width_ / 2, cy = height_ / 2;
                         in.mouseDX += float(me->x_root - warpX_);
@@ -367,16 +385,22 @@ public:
                         in.shouldQuit = true;
                     break;
                 }
+                case ConfigureNotify: {
+                    auto* ce = reinterpret_cast<XConfigureEvent*>(evbuf);
+                    if (ce->width > 0 && ce->height > 0) {
+                        width_ = ce->width;
+                        height_ = ce->height;
+                    }
+                    break;
+                }
                 default: break;
             }
         }
 
-        // Escape quits the game (and releases the pointer capture).
-        if (in.keys[KEY_ESC]) {
-            setCursorCaptured(false);
-            in.keys[KEY_ESC] = 0;
-            in.shouldQuit = true;
-        }
+        in.mouseX = float(mouseX_);
+        in.mouseY = float(mouseY_);
+        // Note: Escape is a normal key now (the game toggles the settings menu
+        // on it); only the window-close button sets shouldQuit.
         return !in.shouldQuit;
     }
 
@@ -431,6 +455,42 @@ public:
         if (x_.XSync) x_.XSync(dpy_, 0);
     }
 
+    void resize(int w, int h) override {
+        if (w <= 0 || h <= 0) return;
+        // Apply immediately so the next frame already uses the new size (the
+        // async ConfigureNotify confirms it afterwards).
+        width_ = w; height_ = h;
+        mouseX_ = w / 2; mouseY_ = h / 2;
+        if (dpy_ && x_.XResizeWindow) {
+            x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
+            if (x_.XSync) x_.XSync(dpy_, 0);
+        }
+    }
+
+    void setFullscreen(bool on) override {
+        if (!dpy_ || !x_.XSendEvent || !x_.XInternAtom) return;
+        // EWMH fullscreen: a _NET_WM_STATE client message to the root window.
+        x11::Atom wmState = x_.XInternAtom(dpy_, "_NET_WM_STATE", 0);
+        x11::Atom fs = x_.XInternAtom(dpy_, "_NET_WM_STATE_FULLSCREEN", 0);
+        if (!wmState || !fs) return;
+        struct FullscreenMsg {
+            int type; unsigned long serial; int send_event; x11::Display* display;
+            x11::Window window; x11::Atom message_type; int format; long data[5];
+        } msg{};
+        msg.type = ClientMessage;
+        msg.window = win_;
+        msg.message_type = wmState;
+        msg.format = 32;
+        msg.data[0] = on ? 1 : 0;   // _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE
+        msg.data[1] = (long)fs;
+        int screen = x_.XDefaultScreen(dpy_);
+        x11::Window root = x_.XRootWindow(dpy_, screen);
+        constexpr long kSubstructure = (1L << 20) | (1L << 21);  // Redirect|Notify
+        x_.XSendEvent(dpy_, root, 0, kSubstructure, reinterpret_cast<x11::XEvent*>(&msg));
+        if (x_.XSync) x_.XSync(dpy_, 0);
+        // The window manager resizes the window; ConfigureNotify syncs width_/height_.
+    }
+
     void* loadGLProc(const char* name) override {
         void* p = nullptr;
         if (x_.glXGetProcAddress) p = x_.glXGetProcAddress(reinterpret_cast<const unsigned char*>(name));
@@ -447,6 +507,7 @@ private:
     x11::Atom wmDelete_ = 0;
     int width_ = 0, height_ = 0;
     int warpX_ = 0, warpY_ = 0;
+    int mouseX_ = 0, mouseY_ = 0;
     bool captured_ = false;
 };
 

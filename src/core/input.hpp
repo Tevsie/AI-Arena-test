@@ -20,6 +20,13 @@ constexpr uint32_t KEY_SHIFT = 0x100 + 0xe1;  // XK_Shift_L
 constexpr uint32_t KEY_CTRL = 0x100 + 0xe3;   // XK_Control_L
 constexpr uint32_t KEY_E = 0x65, KEY_Q = 0x71;
 constexpr uint32_t KEY_R = 0x72, KEY_F = 0x66, KEY_P = 0x70, KEY_X = 0x78;
+// Menu navigation (X11 keysym low bytes; the Win32 backend maps VK_* here).
+constexpr uint32_t KEY_TAB = 0x100 + 0x09;    // XK_Tab
+constexpr uint32_t KEY_ENTER = 0x100 + 0x0d;  // XK_Return
+constexpr uint32_t KEY_LEFT = 0x100 + 0x51;   // XK_Left
+constexpr uint32_t KEY_UP = 0x100 + 0x52;     // XK_Up
+constexpr uint32_t KEY_RIGHT = 0x100 + 0x53;  // XK_Right
+constexpr uint32_t KEY_DOWN = 0x100 + 0x54;   // XK_Down
 
 // Mouse buttons (index into FrameInput::mousePressed/Released).
 // Prefixed "MBTN_" to avoid clashing with the Windows MessageBox MB_* macros.
