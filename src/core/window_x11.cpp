@@ -464,16 +464,33 @@ public:
         if (fullscreen_) {
             return;
         }
-        // Apply immediately so the next frame already uses the new size (the
-        // async ConfigureNotify confirms it afterwards). Preserve mouse
-        // position to avoid cursor jump / mis-aligned clicks after resize.
-        width_ = w; height_ = h;
-        if (mouseX_ >= w) mouseX_ = w - 1;
-        if (mouseY_ >= h) mouseY_ = h - 1;
-        if (mouseX_ < 0) mouseX_ = 0;
-        if (mouseY_ < 0) mouseY_ = 0;
+        // Keep cursor over the same UI element after resize: the settings
+        // panel is centered, so its origin moves by (new-old)/2. Move the
+        // mouse by the same delta and warp the OS cursor so visual and
+        // logical positions stay in sync. This fixes the "cursor clicks
+        // higher / can't hit buttons after changing resolution" bug.
+        int oldW = width_;
+        int oldH = height_;
+        int newMouseX = mouseX_ + (w - oldW) / 2;
+        int newMouseY = mouseY_ + (h - oldH) / 2;
+        if (newMouseX < 0) newMouseX = 0;
+        if (newMouseX >= w) newMouseX = w - 1;
+        if (newMouseY < 0) newMouseY = 0;
+        if (newMouseY >= h) newMouseY = h - 1;
+        mouseX_ = newMouseX;
+        mouseY_ = newMouseY;
+
+        // Update size immediately so the next frame's UI layout uses the new
+        // size and the adjusted mouse stays over the same button. The async
+        // ConfigureNotify will confirm the size afterwards.
+        width_ = w;
+        height_ = h;
+
         if (dpy_ && x_.XResizeWindow) {
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
+            if (x_.XWarpPointer && !captured_) {
+                x_.XWarpPointer(dpy_, 0, win_, 0, 0, 0, 0, mouseX_, mouseY_);
+            }
             if (x_.XSync) x_.XSync(dpy_, 0);
         }
     }

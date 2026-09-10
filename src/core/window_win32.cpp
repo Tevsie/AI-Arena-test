@@ -209,18 +209,36 @@ public:
         if (fullscreen_) {
             return;
         }
+        // Keep cursor over the same UI element after resize: the settings
+        // panel is centered, so its origin moves by (new-old)/2. Move the
+        // mouse by the same delta and warp the OS cursor so visual and
+        // logical positions stay in sync. This fixes the "cursor clicks
+        // higher / can't hit buttons after changing resolution" bug.
+        int oldW = width_;
+        int oldH = height_;
+        int newMouseX = mouseX_ + (w - oldW) / 2;
+        int newMouseY = mouseY_ + (h - oldH) / 2;
+        if (newMouseX < 0) newMouseX = 0;
+        if (newMouseX >= w) newMouseX = w - 1;
+        if (newMouseY < 0) newMouseY = 0;
+        if (newMouseY >= h) newMouseY = h - 1;
+        mouseX_ = newMouseX;
+        mouseY_ = newMouseY;
+
         width_ = w; height_ = h;
-        // Preserve mouse position, just clamp to new bounds to avoid
-        // out-of-range clicks after shrinking the window.
-        if (mouseX_ >= w) mouseX_ = w - 1;
-        if (mouseY_ >= h) mouseY_ = h - 1;
-        if (mouseX_ < 0) mouseX_ = 0;
-        if (mouseY_ < 0) mouseY_ = 0;
+
         if (!hwnd_) return;
         RECT r{0, 0, w, h};
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
         SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
                      SWP_NOMOVE | SWP_NOZORDER);
+        // Warp OS cursor to keep it over the same button after the panel
+        // recenters. Only when not captured (menu open).
+        if (!captured_) {
+            POINT pt{mouseX_, mouseY_};
+            ClientToScreen(hwnd_, &pt);
+            SetCursorPos(pt.x, pt.y);
+        }
     }
 
     void setFullscreen(bool on) override {
