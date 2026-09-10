@@ -37,10 +37,10 @@ constexpr int32_t BRICK_MAX_H = 4;       // tallest brick footprint (cells)
 constexpr float BRICK_MAX_EXTENT = 4.0f; // deepest brick body behind the face (m)
 constexpr int32_t BRICK_MAX_CELLS = 4;   // cell reach for grid-window queries
 
-// Interaction
-constexpr float PULL_REACH = 6.5f;       // max distance for brick targeting
-constexpr float PULL_DEPTH = 0.65f;      // max extension of a pulled brick (+Z)
-constexpr float BRICK_LERP_TIME = 3.0f;  // seconds for a click-triggered in/out lerp
+// Interaction — tuned for snappy, far-reaching pulls.
+constexpr float PULL_REACH = 7.5f;       // max distance for brick targeting (slightly increased)
+constexpr float PULL_DEPTH = 1.4f;       // max extension of a pulled brick (+Z) — further
+constexpr float BRICK_LERP_TIME = 0.65f; // seconds for a click-triggered in/out lerp — faster
 
 // Player
 constexpr float EYE_HEIGHT = 1.62f;      // camera height above feet

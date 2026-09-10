@@ -210,7 +210,12 @@ public:
             return;
         }
         width_ = w; height_ = h;
-        mouseX_ = w / 2; mouseY_ = h / 2;
+        // Preserve mouse position, just clamp to new bounds to avoid
+        // out-of-range clicks after shrinking the window.
+        if (mouseX_ >= w) mouseX_ = w - 1;
+        if (mouseY_ >= h) mouseY_ = h - 1;
+        if (mouseX_ < 0) mouseX_ = 0;
+        if (mouseY_ < 0) mouseY_ = 0;
         if (!hwnd_) return;
         RECT r{0, 0, w, h};
         AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);

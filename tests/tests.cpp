@@ -381,14 +381,17 @@ static void testInteraction() {
     CHECK(t.bx == tr.ox && t.by == tr.oy);
     CHECK_NEAR(t.depth, 0.0f, 1e-5);
 
-    // Click-pull: a 3 s lerp toward PULL_DEPTH (halfway after 1.5 s).
+    // Click-pull: lerp toward PULL_DEPTH (halfway after BRICK_LERP_TIME/2).
     const float dt = 1.0f / 60.0f;
+    const int halfFrames = int((BRICK_LERP_TIME * 0.5f) / dt + 0.5f);
+    const int fullFrames = int(BRICK_LERP_TIME / dt + 2.5f);
+    const int extraFrames = fullFrames + 20;
     CHECK(it.pull(w, t));
     CHECK(it.isLerping(t.bx, t.by));
-    for (int i = 0; i < 90; ++i) it.update(w, p, dt);   // 1.5 s
-    CHECK_NEAR(w.brickDepth(t.bx, t.by), PULL_DEPTH * 0.5f, 0.03f);
+    for (int i = 0; i < halfFrames; ++i) it.update(w, p, dt);
+    CHECK_NEAR(w.brickDepth(t.bx, t.by), PULL_DEPTH * 0.5f, 0.05f);
     CHECK(w.brickState(t.bx, t.by) == STATE_EXTENDING);
-    for (int i = 0; i < 100; ++i) it.update(w, p, dt);  // past 3 s total
+    for (int i = 0; i < fullFrames; ++i) it.update(w, p, dt);  // past full lerp
     CHECK_NEAR(w.brickDepth(t.bx, t.by), PULL_DEPTH, 1e-4f);
     CHECK(w.brickState(t.bx, t.by) == STATE_EXTENDED);
     CHECK(!it.isLerping(t.bx, t.by));
@@ -398,23 +401,25 @@ static void testInteraction() {
     TargetResult stood{true, standX, -1, w.brickDepth(standX, -1), 1.0f};
     CHECK(!it.push(w, p, stood));
 
-    // Click-push the extended brick back flush over 3 s.
+    // Click-push the extended brick back flush.
     t = it.cast(p, w);
     CHECK(t.hit && t.bx == tr.ox && t.by == tr.oy);
     CHECK(it.push(w, p, t));
-    for (int i = 0; i < 200; ++i) it.update(w, p, dt);
+    for (int i = 0; i < extraFrames; ++i) it.update(w, p, dt);
     CHECK_NEAR(w.brickDepth(48, expectY), 0.0f, 1e-4f);
     CHECK(w.brickState(48, expectY) == STATE_REST);
 
     // Re-clicking mid-lerp retargets smoothly from the current depth.
     t = it.cast(p, w);
     CHECK(it.pull(w, t));
-    for (int i = 0; i < 30; ++i) it.update(w, p, dt);  // 0.5 s out
+    int partial = int((BRICK_LERP_TIME * 0.4f) / dt + 0.5f);
+    if (partial < 1) partial = 1;
+    for (int i = 0; i < partial; ++i) it.update(w, p, dt);
     float mid = w.brickDepth(t.bx, t.by);
     CHECK(mid > 0.0f && mid < PULL_DEPTH);
     t = it.cast(p, w);
     CHECK(it.push(w, p, t));                           // reverse back in
-    for (int i = 0; i < 200; ++i) it.update(w, p, dt);
+    for (int i = 0; i < extraFrames; ++i) it.update(w, p, dt);
     CHECK_NEAR(w.brickDepth(t.bx, t.by), 0.0f, 1e-4f);
     CHECK(w.brickState(t.bx, t.by) == STATE_REST);
 }

@@ -465,9 +465,13 @@ public:
             return;
         }
         // Apply immediately so the next frame already uses the new size (the
-        // async ConfigureNotify confirms it afterwards).
+        // async ConfigureNotify confirms it afterwards). Preserve mouse
+        // position to avoid cursor jump / mis-aligned clicks after resize.
         width_ = w; height_ = h;
-        mouseX_ = w / 2; mouseY_ = h / 2;
+        if (mouseX_ >= w) mouseX_ = w - 1;
+        if (mouseY_ >= h) mouseY_ = h - 1;
+        if (mouseX_ < 0) mouseX_ = 0;
+        if (mouseY_ < 0) mouseY_ = 0;
         if (dpy_ && x_.XResizeWindow) {
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
             if (x_.XSync) x_.XSync(dpy_, 0);
