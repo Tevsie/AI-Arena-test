@@ -60,9 +60,10 @@ public:
 
     // Cast the center-screen ray against the brick grid within PULL_REACH.
     // Uses an exact 2D grid DDA over the wall's (x,y) cells (infinite in both
-    // axes). Every cell's own brick covers the whole cell (sizes >= 1 m and
-    // corner-anchored), so it is tested first; neighbors whose (up to 5 m)
-    // bodies overlap the cell are tested too, nearest wins.
+    // axes). The mosaic tiling gives every cell exactly one brick, so each
+    // stepped cell tests its containing brick and the first hit wins; cells of
+    // the same brick are contiguous along the ray and tested once. Reports the
+    // hit brick's origin.
     TargetResult cast(const Player& player, const Wall& wall) const {
         TargetResult r;
         Vec3 eye = player.eye();
@@ -79,47 +80,21 @@ public:
         float tMaxX = std::fabs(dir.x) < 1e-9f ? 1e30f : (nextX - eye.x) / dir.x;
         float tMaxY = std::fabs(dir.y) < 1e-9f ? 1e30f : (nextY - eye.y) / dir.y;
 
+        int32_t prevOx = INT32_MIN, prevOy = INT32_MIN;
         for (int i = 0; i < 64; ++i) {
-            // 1) The brick owning this cell always covers it — test it first so
-            //    the cell under the crosshair wins ties against overlapping
-            //    large neighbors.
-            {
-                AABB b = wall.brickAABB(c.x, c.y);
+            BrickRect rect = brickAt(c.x, c.y);
+            if (rect.ox != prevOx || rect.oy != prevOy) {
+                prevOx = rect.ox;
+                prevOy = rect.oy;
+                AABB b = wall.brickAABB(rect.ox, rect.oy);
                 float tn = 0.0f;
                 if (rayAABB(ray, b, tn) && tn <= PULL_REACH) {
                     r.hit = true;
-                    r.bx = c.x; r.by = c.y;
-                    r.depth = wall.brickDepth(c.x, c.y);
+                    r.bx = rect.ox; r.by = rect.oy;
+                    r.depth = wall.brickDepth(rect.ox, rect.oy);
                     r.dist = tn;
                     return r;
                 }
-            }
-            // 2) Neighboring bricks (corner-anchored, up to 5 m) whose bodies
-            //    reach into this cell from -X/-Y.
-            float bestT = PULL_REACH + 1.0f;
-            int32_t hitX = 0, hitY = 0;
-            bool found = false;
-            for (int32_t oy = -BRICK_SIZE_MAX_CELLS; oy <= 0; ++oy) {
-                for (int32_t ox = -BRICK_SIZE_MAX_CELLS; ox <= 0; ++ox) {
-                    if (ox == 0 && oy == 0) continue;
-                    int32_t bx = c.x + ox, by = c.y + oy;
-                    // Quick reject: the neighbor must actually reach this cell.
-                    float s = brickSize(bx, by);
-                    if (float(bx) + s <= float(c.x) || float(by) + s <= float(c.y))
-                        continue;
-                    AABB b = wall.brickAABB(bx, by);
-                    float tn = 0.0f;
-                    if (rayAABB(ray, b, tn) && tn <= PULL_REACH && tn < bestT) {
-                        bestT = tn; hitX = bx; hitY = by; found = true;
-                    }
-                }
-            }
-            if (found) {
-                r.hit = true;
-                r.bx = hitX; r.by = hitY;
-                r.depth = wall.brickDepth(hitX, hitY);
-                r.dist = bestT;
-                return r;
             }
             // Advance to the next cell along the nearer axis.
             if (tMaxX < tMaxY) { tMaxX += tDeltaX; c.x += stepX; }
@@ -132,14 +107,14 @@ public:
     // retraction would drop the player). A brick the player merely touches with
     // their body is NOT occupied.
     bool isOccupied(const Player& player, const Wall& wall, int32_t bx, int32_t by) const {
-        AABB b = wall.brickAABB(bx, by);
-        float s = brickSize(bx, by);
+        BrickRect rect = brickAt(bx, by);
+        AABB b = wall.brickAABB(rect.ox, rect.oy);
         // The player's feet box.
         AABB feet{{player.pos.x - PLAYER_HALF_W, player.pos.y - 0.05f, player.pos.z - PLAYER_HALF_W},
                   {player.pos.x + PLAYER_HALF_W, player.pos.y + 0.02f, player.pos.z + PLAYER_HALF_W}};
-        // The brick's top face (a thin slab at y = by+s).
-        AABB top{{float(bx), float(by) + s - 0.02f, b.mn.z},
-                 {float(bx) + s, float(by) + s + 0.02f, b.mx.z}};
+        // The brick's top face (a thin slab at y = oy+h).
+        AABB top{{float(rect.ox), float(rect.oy + rect.h) - 0.02f, b.mn.z},
+                 {float(rect.ox + rect.w), float(rect.oy + rect.h) + 0.02f, b.mx.z}};
         return feet.overlaps(top);
     }
 

@@ -69,7 +69,7 @@ float Game::seedWorld() {
     float platformTop = 0.0f;
     for (int32_t bx = 44; bx <= 51; ++bx) {
         wall_.setBrick(bx, -1, STATE_EXTENDED, 1.0f);
-        float top = float(-1) + brickSize(bx, -1);
+        float top = wall_.brickAABB(bx, -1).mx.y;
         if (top > platformTop) platformTop = top;
     }
     // A short pre-built step path so the scene has visible ledges immediately.
@@ -119,7 +119,7 @@ void Game::simulateFrame(const FrameInput& in, float dt) {
     }
 
     stats_.residentChunks = wall_.residentCount();
-    stats_.drawnInstances = wall_.residentCount() * CHUNK_BRICKS;
+    stats_.drawnInstances = wall_.residentBrickCount();
     stats_.modifiedBricks = wall_.store().activeCount();
     stats_.playerBrickY = floori(player_.pos.y / BRICK);
 }
@@ -234,18 +234,19 @@ void Game::demoDrive(float dt) {
 
     int32_t tick = stats_.frame;
 
-    // Climb one ledge every 24 frames; extend the brick at the player's feet
-    // and snap onto the tallest supporting ledge under the footprint so the
-    // controller rests on it (grounded) between steps. Brick tops vary with
-    // size (1/2.5/5 m) and older large ledges can tower above the new one, so
-    // the support height is measured, not assumed (sizes >= 1 m keep the
-    // climb monotonic).
-    if (tick % 24 == 0 && tick > 0) {
+    // Climb one ledge every 12 frames; extend the brick at the player's feet
+    // and snap onto the tallest extended ledge overlapping the footprint so
+    // the controller rests on it (grounded) between steps. Mosaic bricks are
+    // 1..4 m tall and extended towers can stack above the new brick, so the
+    // support height is measured over a vertical window (not assumed): the
+    // 12-frame cadence keeps falls between snaps (~0.4 m) below the minimum
+    // 1 m step gain, which keeps the climb monotonic.
+    if (tick % 12 == 0 && tick > 0) {
         int32_t row = floori(player_.pos.y / BRICK);
         wall_.setBrick(48, row, STATE_EXTENDED, 1.0f);
-        float top = float(row) + brickSize(48, row);
+        float top = wall_.brickAABB(48, row).mx.y;
         for (int32_t bx = 43; bx <= 48; ++bx) {
-            for (int32_t by = row - 5; by <= row; ++by) {
+            for (int32_t by = row - 5; by <= row + 8; ++by) {
                 if (wall_.brickDepth(bx, by) <= 0.0f) continue;  // flush: no z overlap
                 AABB b = wall_.brickAABB(bx, by);
                 if (b.mx.x > 48.0f - PLAYER_HALF_W && b.mn.x < 48.0f + PLAYER_HALF_W &&

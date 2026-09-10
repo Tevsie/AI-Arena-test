@@ -365,47 +365,53 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
 
     gl.BindBuffer(GL_ARRAY_BUFFER, instVBO_);
     wall.forEachResident([&](const Chunk& ch) {
-        // Rebuild this chunk's 256 instances if it changed.
+        // Rebuild this chunk's instances if it changed: one per mosaic brick
+        // (origins only; at most CHUNK_BRICKS when the chunk is all 1x1s).
         if (ch.dirty) {
             int32_t ox = ch.coord.cx * CHUNK_X;
             int32_t oy = ch.coord.cy * CHUNK_Y;
+            int32_t n = 0;
             for (int32_t i = 0; i < CHUNK_BRICKS; ++i) {
                 int32_t bx = ox + (i % CHUNK_X);
                 int32_t by = oy + (i / CHUNK_X);
-                float d = wall.brickDepth(bx, by);
-                float s = brickSize(bx, by);
-                // Micro-jitter (visual only, collision stays exact): overlapping
-                // bricks share coplanar faces that z-fight and flicker, so each
-                // brick is nudged by a deterministic sub-2cm hash offset.
+                BrickRect r = brickAt(bx, by);
+                if (r.ox != bx || r.oy != by) continue;  // not an origin
+                float d = wall.brickDepth(r.ox, r.oy);
+                float w = float(r.w), h = float(r.h);
+                float e = brickExtent(r);
+                // Micro-jitter (visual only, collision stays exact): opens
+                // hairline mortar gaps between the exactly-tiled bricks and
+                // keeps pulled-brick faces off neighbor planes.
                 uint32_t jh = hash2d(bx ^ 0x1234, by ^ 0x5678);
                 float jx = float((jh >> 0) & 7u) * 0.0025f;
                 float jy = float((jh >> 3) & 7u) * 0.0025f;
                 float jz = float((jh >> 6) & 7u) * 0.0025f;
-                Instance& inst = staging_[i];
+                Instance& inst = staging_[n++];
                 std::memset(inst.model, 0, sizeof(inst.model));
-                inst.model[0] = s;
-                inst.model[5] = s;
-                inst.model[10] = s;
-                inst.model[12] = float(bx) + s * 0.5f + jx;
-                inst.model[13] = float(by) + s * 0.5f + jy;
-                inst.model[14] = d - s * 0.5f + jz;   // rigid slide outward (+Z)
+                inst.model[0] = w;
+                inst.model[5] = h;
+                inst.model[10] = e;
+                inst.model[12] = float(bx) + w * 0.5f + jx;
+                inst.model[13] = float(by) + h * 0.5f + jy;
+                inst.model[14] = d - e * 0.5f + jz;   // rigid slide outward (+Z)
                 inst.model[15] = 1.0f;
                 inst.shade = float(ch.shade[i]);
             }
             GLsizeiptr offset = GLsizeiptr(size_t(ch.slot) * CHUNK_BRICKS * kInstanceStride);
             gl.BufferSubData(GL_ARRAY_BUFFER, offset,
-                             CHUNK_BRICKS * kInstanceStride, staging_);
+                             GLsizeiptr(n) * kInstanceStride, staging_);
             const_cast<Chunk&>(ch).dirty = false;
         }
-        // Frustum culling: conservative AABB of this chunk's bricks, including
-        // the maximum brick size (5 m bodies reach into +X/+Y and -Z) and the
-        // maximum brick protrusion (+Z). Off-screen chunks are skipped entirely.
+        // Frustum culling: the mosaic tiles the chunk exactly, so the chunk
+        // box is exact in X/Y (plus jitter epsilon) and only needs the body
+        // depth (-Z) and the maximum brick protrusion (+Z). Off-screen chunks
+        // are skipped entirely.
         float x0 = float(ch.coord.cx) * CHUNK_WORLD_W;
         float y0 = float(ch.coord.cy) * CHUNK_WORLD_H;
-        AABB chunkBox{{x0, y0, -BRICK_SIZE_MAX - 0.5f},
-                      {x0 + CHUNK_WORLD_W + BRICK_SIZE_MAX,
-                       y0 + CHUNK_WORLD_H + BRICK_SIZE_MAX, 1.5f}};
-        if (frustum.intersects(chunkBox)) ++visible;
+        AABB chunkBox{{x0 - 0.05f, y0 - 0.05f, -BRICK_MAX_EXTENT - 0.5f},
+                      {x0 + CHUNK_WORLD_W + 0.05f,
+                       y0 + CHUNK_WORLD_H + 0.05f, 1.5f}};
+        if (frustum.intersects(chunkBox)) visible += ch.brickCount;
     });
 
     // ---- sky ----------------------------------------------------------------
@@ -438,9 +444,9 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     wall.forEachResident([&](const Chunk& ch) {
         float x0 = float(ch.coord.cx) * CHUNK_WORLD_W;
         float y0 = float(ch.coord.cy) * CHUNK_WORLD_H;
-        AABB chunkBox{{x0, y0, -BRICK_SIZE_MAX - 0.5f},
-                      {x0 + CHUNK_WORLD_W + BRICK_SIZE_MAX,
-                       y0 + CHUNK_WORLD_H + BRICK_SIZE_MAX, 1.5f}};
+        AABB chunkBox{{x0 - 0.05f, y0 - 0.05f, -BRICK_MAX_EXTENT - 0.5f},
+                      {x0 + CHUNK_WORLD_W + 0.05f,
+                       y0 + CHUNK_WORLD_H + 0.05f, 1.5f}};
         if (!frustum.intersects(chunkBox)) return;
         // Re-point the 5 instanced attributes at this chunk's range (the GL 3.3
         // way of supplying a per-chunk base instance without an index offset).
@@ -450,7 +456,7 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                                    (void*)(base + size_t(i) * 4 * sizeof(float)));
         gl.VertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, kInstanceStride,
                                (void*)(base + 16 * sizeof(float)));
-        gl.DrawArraysInstancedARB(GL_TRIANGLES, 0, 36, CHUNK_BRICKS);
+        gl.DrawArraysInstancedARB(GL_TRIANGLES, 0, 36, ch.brickCount);
     });
 
     // ---- crosshair ----------------------------------------------------------
@@ -466,7 +472,7 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     gl.Disable(GL_BLEND);
 
     gl.BindVertexArray(0);
-    return visible * CHUNK_BRICKS;
+    return visible;   // accumulated brick counts of the visible chunks
 }
 
 void Renderer::uiBegin(int width, int height) {

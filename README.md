@@ -172,9 +172,10 @@ tests/           dependency-free unit tests (grid, store, streaming,
 - **Zero runtime allocations**: every container is a fixed pool (see
   `src/game/wall.hpp`).
 - **Infinite wall in all directions**: brick/chunk coordinates are unbounded
-  in X and Y; procedural appearance (including each brick's random size class:
-  small 1 m / medium 2.5 m / large 5 m) comes from a deterministic spatial
-  hash, so a chunk can be regenerated losslessly at any time. Player
+  in X and Y; procedural appearance (including the non-overlapping brick
+  mosaic: 1×1..4×4 m bricks from 8 deterministic tiling patterns) comes from
+  a deterministic spatial hash, so a chunk can be regenerated losslessly at
+  any time. Player
   modifications persist across unload/reload via the persistent brick store.
 - **No fall respawn**: falling means falling forever (streaming follows you).
 - **Deterministic demos**: `make demo` (or `./build/atw --headless --frames N`)

@@ -6,12 +6,14 @@ each GDD mandate is satisfied.
 ## Coordinate model
 
 - The wall face lies in the **XY plane at z = 0**; gravity is **−Y**.
-- A brick is a rigid cube embedded in the wall, with a deterministic random
-  edge length of **1 m (small), 2.5 m (medium) or 5 m (large)** from a spatial
-  hash. Bricks are corner-anchored: brick `(bx, by)` with size `s` spans
-  `[bx, bx+s] × [by, by+s]`. **Flush** it occupies `z ∈ [−s, 0]` (material
-  behind the wall face). **Pulled** by depth `d` it slides outward to
-  `z ∈ [d−s, d]`.
+- A brick is a rigid box embedded in the wall. Each chunk is covered by an
+  exact mosaic tiling of non-overlapping 1×1..4×4-cell bricks (8 tiling
+  patterns picked per 4×4 macro-cell from a spatial hash), so spawned bricks
+  never overlap and never leave gaps. A brick is identified by its origin
+  (minimum-corner cell); any grid cell resolves to its containing brick.
+  **Flush** a brick occupies `z ∈ [−e, 0]` (material behind the wall face,
+  `e` = larger footprint edge). **Pulled** by depth `d` it slides outward to
+  `z ∈ [d−e, d]`.
 - Bricks are indexed by integer grid cells `(x, y)`, unbounded in both axes
   (infinite wall in all directions). A chunk is a `16 × 16` block of bricks;
   chunks are indexed `(cx, cy)` and generated procedurally.
@@ -58,17 +60,20 @@ is no fall respawn: a falling player keeps falling and streaming follows them.
 1. Semi-implicit Euler integration with **sub-stepping** (max 0.25 m per step) so
    thin ledges can't be tunneled through at high fall speeds.
 2. Per sub-step, the candidate brick window is the player's AABB rounded to the
-   grid, extended −5/+1 cells (large corner-anchored bricks may originate up to
-   5 cells away in −X/−Y). For each candidate, an axis-separated AABB overlap test resolves
-   the minimum-penetration axis; ground contact is inferred when the player is
-   pushed **up**. A small contact epsilon makes resting contact detectable.
+   grid, extended −4/+1 cells (mosaic bricks are up to 4 wide, so a brick
+   overlapping the player may originate up to 4 cells away in −X/−Y). Each
+   candidate cell resolves to its containing brick; for each, an
+   axis-separated AABB overlap test resolves the minimum-penetration axis;
+   ground contact is inferred when the player is pushed **up**. A small
+   contact epsilon makes resting contact detectable.
 
 This is O(candidate cells) per sub-step — constant and cache-friendly.
 
 ## Rendering
 
-- **One cube mesh**, drawn as instances scaled per brick (1 / 2.5 / 5 m). Each
-  resident chunk owns a fixed range in the instance VBO keyed by its pool slot.
+- **One cube mesh**, drawn as instances scaled per brick (1×1..4×4 m
+  footprints). Each resident chunk owns a fixed range in the instance VBO
+  keyed by its pool slot (at most 256 instances: one per mosaic brick).
 - `glBufferSubData` uploads only **dirty** chunk ranges (brick modified, or chunk
   streamed in). Instanced attributes (4×vec4 model matrix + 1×float shade) use
   `glVertexAttribDivisor`.

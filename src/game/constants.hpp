@@ -26,14 +26,16 @@ constexpr int32_t RESIDENT_COLS = ACTIVE_CHUNK_RANGE * 2 + 1; // 9 columns resid
 constexpr int32_t MAX_RESIDENT_CHUNKS = RESIDENT_ROWS * RESIDENT_COLS;  // 81 chunks
 constexpr int32_t MAX_RESIDENT_BRICKS = MAX_RESIDENT_CHUNKS * CHUNK_BRICKS;  // 20,736
 
-// Brick sizes: every brick is deterministically assigned one of three edge
-// lengths (see brickSize() in grid.hpp). Bricks are corner-anchored at their
-// cell minimum: brick (bx,by) with size s spans [bx,bx+s] x [by,by+s].
-constexpr float BRICK_SIZE_SMALL = 1.0f;
-constexpr float BRICK_SIZE_MEDIUM = 2.5f;
-constexpr float BRICK_SIZE_LARGE = 5.0f;
-constexpr float BRICK_SIZE_MAX = BRICK_SIZE_LARGE;
-constexpr int32_t BRICK_SIZE_MAX_CELLS = 5;   // ceil(BRICK_SIZE_MAX / BRICK)
+// Brick mosaic: each chunk is tiled by non-overlapping rectangular bricks
+// (see brickAt() in grid.hpp). Bricks are between 1x1 and 4x4 cells, fully
+// contained in their chunk, and every grid cell belongs to exactly one brick,
+// so spawned bricks never overlap or leave gaps. Depth extent behind the wall
+// face equals the brick's larger footprint edge (1..4 m).
+constexpr int32_t MOSAIC_CELLS = 4;      // macro-cell edge (cells); chunk = 4x4 macros
+constexpr int32_t BRICK_MAX_W = 4;       // widest brick footprint (cells)
+constexpr int32_t BRICK_MAX_H = 4;       // tallest brick footprint (cells)
+constexpr float BRICK_MAX_EXTENT = 4.0f; // deepest brick body behind the face (m)
+constexpr int32_t BRICK_MAX_CELLS = 4;   // cell reach for grid-window queries
 
 // Interaction
 constexpr float PULL_REACH = 6.5f;       // max distance for brick targeting

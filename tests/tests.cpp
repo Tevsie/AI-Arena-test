@@ -1,7 +1,7 @@
 // tests.cpp — dependency-free unit tests for the core simulation.
-// Exercises grid math, brick sizes, the persistent brick store, 2D chunk
-// streaming, the kinematic controller, endless falling, and the click/lerp
-// pull/push mechanics. No window/GPU required.
+// Exercises grid math, the non-overlapping brick mosaic, the persistent brick
+// store, 2D chunk streaming, the kinematic controller, endless falling, and
+// the click/lerp pull/push mechanics. No window/GPU required.
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -87,55 +87,141 @@ static void testGrid() {
     CHECK(brickLocalIndex(0, 0) == 0);
     CHECK(brickLocalIndex(15, 15) == 255);
     CHECK(brickLocalIndex(16, 0) == 0);   // belongs to chunk (1,0), local (0,0)
-    // world coords (corner-anchored, back face at z = -size)
+    // world coords (rest box of the containing mosaic brick)
+    BrickRect gr = brickAt(3, 7);
     Vec3 mn = brickMin(3, 7);
-    CHECK_NEAR(mn.x, 3.0, 1e-5);
-    CHECK_NEAR(mn.y, 7.0, 1e-5);
-    CHECK_NEAR(mn.z, -brickSize(3, 7), 1e-5);
+    CHECK_NEAR(mn.x, float(gr.ox), 1e-5);
+    CHECK_NEAR(mn.y, float(gr.oy), 1e-5);
+    CHECK_NEAR(mn.z, -brickExtent(gr), 1e-5);
 }
 
 // ---------------------------------------------------------------------------
-static void testBrickSizes() {
-    // Every brick draws its size from {1 m, 2.5 m, 5 m}.
-    for (int32_t y = -20; y < 20; ++y)
-        for (int32_t x = -20; x < 20; ++x) {
-            float s = brickSize(x, y);
-            CHECK(s == BRICK_SIZE_SMALL || s == BRICK_SIZE_MEDIUM || s == BRICK_SIZE_LARGE);
+static void testMosaic() {
+    // Every pattern tiles its 4x4 macro-cell exactly, and each pattern's LUT
+    // agrees with its rect list (validates the hand-written tables).
+    for (int p = 0; p < 8; ++p) {
+        const MosaicPattern& pat = kMosaic[p];
+        CHECK(pat.count >= 1 && pat.count <= 16);
+        int cover[16] = {};
+        for (int i = 0; i < pat.count; ++i) {
+            int x = pat.rects[i][0], y = pat.rects[i][1];
+            int w = pat.rects[i][2], h = pat.rects[i][3];
+            CHECK(x >= 0 && y >= 0 && w >= 1 && h >= 1 && x + w <= 4 && y + h <= 4);
+            for (int dy = 0; dy < h; ++dy)
+                for (int dx = 0; dx < w; ++dx) cover[(y + dy) * 4 + (x + dx)]++;
         }
-    // All three classes appear in a modest sample (deterministic hash).
-    bool seenS = false, seenM = false, seenL = false;
-    for (int32_t y = 0; y < 16; ++y)
-        for (int32_t x = 0; x < 16; ++x) {
-            float s = brickSize(x, y);
-            seenS |= (s == BRICK_SIZE_SMALL);
-            seenM |= (s == BRICK_SIZE_MEDIUM);
-            seenL |= (s == BRICK_SIZE_LARGE);
-        }
-    CHECK(seenS && seenM && seenL);
+        for (int i = 0; i < 16; ++i) CHECK(cover[i] == 1);
+        for (int ly = 0; ly < 4; ++ly)
+            for (int lx = 0; lx < 4; ++lx) {
+                uint8_t ri = pat.lut[ly * 4 + lx];
+                CHECK(ri < pat.count);
+                int x = pat.rects[ri][0], y = pat.rects[ri][1];
+                int w = pat.rects[ri][2], h = pat.rects[ri][3];
+                CHECK(lx >= x && lx < x + w && ly >= y && ly < y + h);
+            }
+    }
 
-    // Geometry: corner-anchored at the cell minimum, front face at the
-    // extension depth.
+    // Coverage: every cell (incl. negative coords, across chunk borders) maps
+    // to a sane rect containing it; origins are idempotent; bricks never cross
+    // chunk boundaries.
+    for (int32_t y = -40; y < 40; ++y)
+        for (int32_t x = -40; x < 40; ++x) {
+            BrickRect r = brickAt(x, y);
+            CHECK(r.w >= 1 && r.w <= BRICK_MAX_W && r.h >= 1 && r.h <= BRICK_MAX_H);
+            CHECK(x >= r.ox && x < r.ox + r.w && y >= r.oy && y < r.oy + r.h);
+            BrickRect o = brickAt(r.ox, r.oy);
+            CHECK(o.ox == r.ox && o.oy == r.oy && o.w == r.w && o.h == r.h);
+            CHECK(isBrickOrigin(r.ox, r.oy));
+            ChunkCoord a = brickToChunk(r.ox, r.oy);
+            ChunkCoord b = brickToChunk(r.ox + r.w - 1, r.oy + r.h - 1);
+            CHECK(a.cx == b.cx && a.cy == b.cy);
+        }
+
+    // No two distinct bricks overlap (the fixed bug), over a 56x56-cell span
+    // covering 3x3 chunks including negative coords and chunk borders.
+    {
+        struct R { int32_t x, y, w, h; };
+        static R rects[56 * 56];
+        int n = 0;
+        for (int32_t y = -36; y < 20; ++y)
+            for (int32_t x = -36; x < 20; ++x) {
+                if (!isBrickOrigin(x, y)) continue;
+                BrickRect r = brickAt(x, y);
+                bool seen = false;
+                for (int i = 0; i < n; ++i)
+                    if (rects[i].x == r.ox && rects[i].y == r.oy) { seen = true; break; }
+                if (!seen) rects[n++] = {r.ox, r.oy, r.w, r.h};
+            }
+        CHECK(n > 100);
+        for (int i = 0; i < n; ++i)
+            for (int j = i + 1; j < n; ++j) {
+                bool overlap = rects[i].x < rects[j].x + rects[j].w &&
+                               rects[j].x < rects[i].x + rects[i].w &&
+                               rects[i].y < rects[j].y + rects[j].h &&
+                               rects[j].y < rects[i].y + rects[i].h;
+                CHECK(!overlap);
+            }
+    }
+
+    // Geometry: rest box matches the mosaic rect; writes through any cell hit
+    // the same brick; extension slides the box +Z.
     Wall w;
     w.streamAround(0, 0);
-    int32_t bx = 3, by = 7;
-    float s = brickSize(bx, by);
-    AABB b = w.brickAABB(bx, by);
-    CHECK_NEAR(b.mn.x, float(bx), 1e-6);
-    CHECK_NEAR(b.mx.x, float(bx) + s, 1e-6);
-    CHECK_NEAR(b.mn.y, float(by), 1e-6);
-    CHECK_NEAR(b.mx.y, float(by) + s, 1e-6);
-    CHECK_NEAR(b.mx.z, 0.0f, 1e-6);   // flush front face at z=0
-    CHECK_NEAR(b.mn.z, -s, 1e-6);
-    w.setBrick(bx, by, STATE_EXTENDED, PULL_DEPTH);
-    AABB e = w.brickAABB(bx, by);
-    CHECK_NEAR(e.mx.z, PULL_DEPTH, 1e-6);
-    CHECK_NEAR(e.mn.z, PULL_DEPTH - s, 1e-6);
+    {
+        BrickRect r = brickAt(3, 7);
+        float e = brickExtent(r);
+        AABB b = w.brickAABB(3, 7);
+        CHECK_NEAR(b.mn.x, float(r.ox), 1e-6);
+        CHECK_NEAR(b.mx.x, float(r.ox + r.w), 1e-6);
+        CHECK_NEAR(b.mn.y, float(r.oy), 1e-6);
+        CHECK_NEAR(b.mx.y, float(r.oy + r.h), 1e-6);
+        CHECK_NEAR(b.mx.z, 0.0f, 1e-6);   // flush front face at z=0
+        CHECK_NEAR(b.mn.z, -e, 1e-6);
+        for (int32_t dy = 0; dy < r.h; ++dy)
+            for (int32_t dx = 0; dx < r.w; ++dx) {
+                AABB c = w.brickAABB(r.ox + dx, r.oy + dy);
+                CHECK_NEAR(c.mn.x, b.mn.x, 1e-6);
+                CHECK_NEAR(c.mx.x, b.mx.x, 1e-6);
+                CHECK_NEAR(c.mn.y, b.mn.y, 1e-6);
+                CHECK_NEAR(c.mx.y, b.mx.y, 1e-6);
+            }
+        w.setBrick(3, 7, STATE_EXTENDED, PULL_DEPTH);  // non-origin write works
+        AABB eb = w.brickAABB(r.ox, r.oy);
+        CHECK_NEAR(eb.mx.z, PULL_DEPTH, 1e-6);
+        CHECK_NEAR(eb.mn.z, PULL_DEPTH - e, 1e-6);
+        CHECK_NEAR(w.brickDepth(3, 7), PULL_DEPTH, 1e-6);
+        CHECK(w.brickState(3, 7) == STATE_EXTENDED);
+    }
 
-    // Infinite in X: far-negative / far-outside-the-old-width bricks exist.
+    // Infinite wall: far-negative / far-away bricks exist and are well-formed.
     AABB n = w.brickAABB(-100, -50);
     CHECK(n.mx.x > n.mn.x && n.mx.y > n.mn.y && n.mx.z > n.mn.z);
     AABB f = w.brickAABB(100000, 200000);
     CHECK(f.mx.x > f.mn.x && f.mx.y > f.mn.y && f.mx.z > f.mn.z);
+
+    // Variety: several footprint shapes appear in a modest deterministic sample.
+    bool seen1x1 = false, seen4x4 = false, seenTall = false, seenWide = false;
+    for (int32_t y = -40; y < 40; ++y)
+        for (int32_t x = -40; x < 40; ++x) {
+            BrickRect r = brickAt(x, y);
+            seen1x1 |= (r.w == 1 && r.h == 1);
+            seen4x4 |= (r.w == 4 && r.h == 4);
+            seenTall |= (r.w == 1 && r.h == 4);
+            seenWide |= (r.w == 4 && r.h == 1);
+        }
+    CHECK(seen1x1 && seen4x4 && seenTall && seenWide);
+
+    // Chunk brick counts are bounded and vary across the resident window.
+    int lo = 1 << 30, hi = 0;
+    for (int32_t i = 0; i < MAX_RESIDENT_CHUNKS; ++i) {
+        const Chunk& ch = w.poolSlot(i);
+        if (ch.slot < 0) continue;
+        CHECK(ch.brickCount >= 1 && ch.brickCount <= CHUNK_BRICKS);
+        if (ch.brickCount < lo) lo = ch.brickCount;
+        if (ch.brickCount > hi) hi = ch.brickCount;
+    }
+    CHECK(hi > lo);
+    CHECK(w.residentBrickCount() > 81 && w.residentBrickCount() <= 81 * CHUNK_BRICKS);
 }
 
 // ---------------------------------------------------------------------------
@@ -200,7 +286,8 @@ static void testPersistence() {
     Chunk* c = w.find({0, 0});
     CHECK(c != nullptr);
     CHECK(c->activeCount == 1);
-    int32_t local = brickLocalIndex(10, 10);
+    BrickRect pr = brickAt(10, 10);   // state lives on the brick's origin
+    int32_t local = brickLocalIndex(pr.ox, pr.oy);
     CHECK(c->activeLocal[local] == 1);
 }
 
@@ -212,7 +299,7 @@ static void testPlayerPhysics() {
     w.streamAround(3, 0);
 
     // Landing height: tallest platform brick under the spawn footprint
-    // (brick tops vary with size: 0 / 1.5 / 4 m here).
+    // (brick tops vary with the mosaic here).
     float top = platformTopUnder(w, 48.0f, 0.5f);
 
     Player p;
@@ -285,11 +372,13 @@ static void testInteraction() {
     p.yaw = 0.0f; p.pitch = 0.0f;
     Interaction it;
 
-    // Center ray looks at -Z from the eye and hits the brick ahead.
+    // Center ray looks at -Z from the eye and hits the brick ahead: the
+    // reported target is the origin of the mosaic brick under the crosshair.
     TargetResult t = it.cast(p, w);
     CHECK(t.hit);
     int32_t expectY = floori(p.eye().y / BRICK);
-    CHECK(t.bx == 48 && t.by == expectY);
+    BrickRect tr = brickAt(48, expectY);
+    CHECK(t.bx == tr.ox && t.by == tr.oy);
     CHECK_NEAR(t.depth, 0.0f, 1e-5);
 
     // Click-pull: a 3 s lerp toward PULL_DEPTH (halfway after 1.5 s).
@@ -311,7 +400,7 @@ static void testInteraction() {
 
     // Click-push the extended brick back flush over 3 s.
     t = it.cast(p, w);
-    CHECK(t.hit && t.bx == 48 && t.by == expectY);
+    CHECK(t.hit && t.bx == tr.ox && t.by == tr.oy);
     CHECK(it.push(w, p, t));
     for (int i = 0; i < 200; ++i) it.update(w, p, dt);
     CHECK_NEAR(w.brickDepth(48, expectY), 0.0f, 1e-4f);
@@ -456,17 +545,17 @@ static void testRestart() {
     CHECK(g.init("t", 1280, 720, true));
     // Dirty the world, then restart.
     g.wall().setBrick(60, 60, STATE_EXTENDED, PULL_DEPTH);
-    CHECK(g.wall().store().activeCount() == 14);  // 13 seeded + 1
+    CHECK(g.wall().store().activeCount() == 8);  // 7 seeded + 1
     g.player().pos = {100.0f, 200.0f, 30.0f};
     g.restart();
-    // Modifications cleared, only the 13 seeded bricks remain.
-    CHECK(g.wall().store().activeCount() == 13);
+    // Modifications cleared, only the 7 seeded bricks remain.
+    CHECK(g.wall().store().activeCount() == 7);
     CHECK_NEAR(g.wall().brickDepth(60, 60), 0.0f, 1e-6);
     CHECK(g.wall().residentCount() == 81);
     // Player respawned on the platform.
     float top = -1e30f;
     for (int32_t bx = 44; bx <= 51; ++bx) {
-        float t = float(-1) + brickSize(bx, -1);
+        float t = g.wall().brickAABB(bx, -1).mx.y;
         if (t > top) top = t;
     }
     CHECK_NEAR(g.player().pos.x, 48.0f, 1e-6);
@@ -480,7 +569,7 @@ static void testRestart() {
 // ---------------------------------------------------------------------------
 int main() {
     testGrid();
-    testBrickSizes();
+    testMosaic();
     testBrickStore();
     testStreaming();
     testPersistence();

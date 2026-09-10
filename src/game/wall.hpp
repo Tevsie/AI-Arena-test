@@ -259,22 +259,33 @@ public:
     }
 
     // ---- brick state / geometry -------------------------------------------
+    //
+    // All brick queries take an arbitrary grid cell and canonicalize it to the
+    // containing mosaic brick's origin first, so every cell of a brick reads
+    // and writes the same state.
 
     // Current extension depth of a brick (0 if flush).
-    float brickDepth(int32_t bx, int32_t by) const { return store_.depth(bx, by); }
+    float brickDepth(int32_t bx, int32_t by) const {
+        BrickRect r = brickAt(bx, by);
+        return store_.depth(r.ox, r.oy);
+    }
     BrickState brickState(int32_t bx, int32_t by) const {
-        return static_cast<BrickState>(store_.state(bx, by));
+        BrickRect r = brickAt(bx, by);
+        return static_cast<BrickState>(store_.state(r.ox, r.oy));
     }
 
-    // World AABB of a brick, accounting for extension. A rigid cube of the
-    // brick's size class that slides outward: flush occupies z in [-s, 0];
-    // extended by depth d occupies z in [d-s, d]. The wall is infinite, so
-    // every (bx,by) cell holds a brick (corner-anchored at its cell minimum).
+    // World AABB of a brick, accounting for extension. A rigid box of the
+    // brick's mosaic footprint that slides outward: flush occupies
+    // z in [-e, 0] for extent e; extended by depth d occupies z in [d-e, d].
+    // The wall is infinite and exactly tiled, so every (bx,by) cell belongs to
+    // exactly one brick.
     AABB brickAABB(int32_t bx, int32_t by) const {
-        float s = brickSize(bx, by);
-        float d = store_.depth(bx, by);
-        float x0 = float(bx), y0 = float(by);
-        return AABB({x0, y0, d - s}, {x0 + s, y0 + s, d});
+        BrickRect r = brickAt(bx, by);
+        float e = brickExtent(r);
+        float d = store_.depth(r.ox, r.oy);
+        float x0 = float(r.ox), y0 = float(r.oy);
+        return AABB({x0, y0, d - e},
+                    {x0 + float(r.w), y0 + float(r.h), d});
     }
 
     // Returns the resident chunk containing brick (bx,by), or nullptr.
@@ -284,11 +295,12 @@ public:
 
     // Record a brick modification (pull/push). Keeps the owning chunk in sync.
     void setBrick(int32_t bx, int32_t by, BrickState state, float depth) {
-        store_.set(bx, by, state, depth);
-        if (Chunk* ch = chunkAtBrick(bx, by)) {
+        BrickRect r = brickAt(bx, by);
+        store_.set(r.ox, r.oy, state, depth);
+        if (Chunk* ch = chunkAtBrick(r.ox, r.oy)) {
             ch->dirty = true;
             // Track the active-brick count incrementally (used by fast paths).
-            int32_t local = brickLocalIndex(bx, by);
+            int32_t local = brickLocalIndex(r.ox, r.oy);
             bool wasActive = ch->activeLocal[local];
             bool nowActive = (state != STATE_REST);
             if (nowActive != wasActive) {
@@ -296,6 +308,13 @@ public:
                 ch->activeCount += nowActive ? 1 : -1;
             }
         }
+    }
+
+    // Total mosaic bricks across all resident chunks (varies with the mosaic).
+    int32_t residentBrickCount() const {
+        int32_t n = 0;
+        forEachResident([&](const Chunk& ch) { n += ch.brickCount; });
+        return n;
     }
 
     BrickStore& store() { return store_; }

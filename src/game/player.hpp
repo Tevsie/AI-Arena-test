@@ -131,12 +131,14 @@ private:
         grounded = false;
         AABB pb = box();
 
-        // Candidate brick grid window. Bricks are corner-anchored and up to
-        // BRICK_SIZE_MAX_CELLS wide, so a brick overlapping the player may
-        // originate that many cells in -X/-Y; +1 cell of margin covers +X/+Y.
-        int32_t x0 = floori(pb.mn.x / BRICK) - BRICK_SIZE_MAX_CELLS;
+        // Candidate brick grid window. Mosaic bricks are up to BRICK_MAX_CELLS
+        // wide, so a brick overlapping the player may originate that many
+        // cells in -X/-Y; +1 cell of margin covers +X/+Y. Each cell resolves
+        // to its containing brick (wall.brickAABB canonicalizes), so bricks
+        // spanning several cells are simply tested more than once.
+        int32_t x0 = floori(pb.mn.x / BRICK) - BRICK_MAX_CELLS;
         int32_t x1 = floori(pb.mx.x / BRICK) + 1;
-        int32_t y0 = floori(pb.mn.y / BRICK) - BRICK_SIZE_MAX_CELLS;
+        int32_t y0 = floori(pb.mn.y / BRICK) - BRICK_MAX_CELLS;
         int32_t y1 = floori(pb.mx.y / BRICK) + 1;
 
         for (int pass = 0; pass < 3; ++pass) {
