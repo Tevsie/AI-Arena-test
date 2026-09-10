@@ -29,8 +29,9 @@ void main() {
     mat4 model = mat4(aCol0, aCol1, aCol2, aCol3);
     vec4 world = model * vec4(aPos, 1.0);
     gl_Position = uViewProj * world;
-    // Cube normals are axis-aligned; the model matrix only translates (rigid
-    // slide), so mat3(model) is a valid normal transform here.
+    // Cube normals are axis-aligned; the model matrix is a uniform scale plus
+    // translation (rigid slide), so mat3(model) is a valid normal transform
+    // here (renormalized in the fragment shader).
     vNormal = mat3(model) * aNormal;
     float dist = distance(uCamPos, world.xyz);
     float sh = aShade * (1.0 / 255.0);
@@ -269,14 +270,15 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                 int32_t bx = ox + (i % CHUNK_X);
                 int32_t by = oy + (i / CHUNK_X);
                 float d = wall.brickDepth(bx, by);
+                float s = brickSize(bx, by);
                 Instance& inst = staging_[i];
                 std::memset(inst.model, 0, sizeof(inst.model));
-                inst.model[0] = 1.0f;
-                inst.model[5] = 1.0f;
-                inst.model[10] = 1.0f;
-                inst.model[12] = float(bx) + 0.5f;
-                inst.model[13] = float(by) + 0.5f;
-                inst.model[14] = d - 0.5f;   // rigid slide outward (+Z)
+                inst.model[0] = s;
+                inst.model[5] = s;
+                inst.model[10] = s;
+                inst.model[12] = float(bx) + s * 0.5f;
+                inst.model[13] = float(by) + s * 0.5f;
+                inst.model[14] = d - s * 0.5f;   // rigid slide outward (+Z)
                 inst.model[15] = 1.0f;
                 inst.shade = float(ch.shade[i]);
             }
@@ -285,12 +287,14 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                              CHUNK_BRICKS * kInstanceStride, staging_);
             const_cast<Chunk&>(ch).dirty = false;
         }
-        // Frustum culling: conservative AABB of this chunk's column and row,
-        // including the maximum brick protrusion (+Z). Vertical rows beyond the
-        // camera frustum and columns behind the camera are skipped entirely.
+        // Frustum culling: conservative AABB of this chunk's bricks, including
+        // the maximum brick size (5 m bodies reach into +X/+Y and -Z) and the
+        // maximum brick protrusion (+Z). Off-screen chunks are skipped entirely.
         float x0 = float(ch.coord.cx) * CHUNK_WORLD_W;
         float y0 = float(ch.coord.cy) * CHUNK_WORLD_H;
-        AABB chunkBox{{x0, y0, -1.5f}, {x0 + CHUNK_WORLD_W, y0 + CHUNK_WORLD_H, 1.5f}};
+        AABB chunkBox{{x0, y0, -BRICK_SIZE_MAX - 0.5f},
+                      {x0 + CHUNK_WORLD_W + BRICK_SIZE_MAX,
+                       y0 + CHUNK_WORLD_H + BRICK_SIZE_MAX, 1.5f}};
         if (frustum.intersects(chunkBox)) ++visible;
     });
 
@@ -324,7 +328,9 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     wall.forEachResident([&](const Chunk& ch) {
         float x0 = float(ch.coord.cx) * CHUNK_WORLD_W;
         float y0 = float(ch.coord.cy) * CHUNK_WORLD_H;
-        AABB chunkBox{{x0, y0, -1.5f}, {x0 + CHUNK_WORLD_W, y0 + CHUNK_WORLD_H, 1.5f}};
+        AABB chunkBox{{x0, y0, -BRICK_SIZE_MAX - 0.5f},
+                      {x0 + CHUNK_WORLD_W + BRICK_SIZE_MAX,
+                       y0 + CHUNK_WORLD_H + BRICK_SIZE_MAX, 1.5f}};
         if (!frustum.intersects(chunkBox)) return;
         // Re-point the 5 instanced attributes at this chunk's range (the GL 3.3
         // way of supplying a per-chunk base instance without an index offset).

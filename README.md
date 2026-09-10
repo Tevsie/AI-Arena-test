@@ -86,8 +86,8 @@ back to headless mode and prints a status line.
 | Mouse            | Look around                             |
 | `W A S D`        | Move                                    |
 | `Space`          | Jump                                    |
-| **Left mouse**   | **Pull** target brick outward (ledge)   |
-| **Right mouse**  | **Push** target brick back flush        |
+| **Left mouse**   | **Pull** target brick outward (click, 3 s lerp) |
+| **Right mouse**  | **Push** target brick back flush (click, 3 s lerp) |
 | `Esc`            | Quit                                    |
 
 The center-screen crosshair turns **green** when a brick is in reach. You
@@ -115,7 +115,7 @@ are ever re-uploaded.
 matrix and drops entire chunks that are off-screen (behind the camera, above/
 below the frustum, or beyond the far plane) before issuing any draw call.
 Distance-based LOD fades far bricks to a flat shade and fog-recedes distant
-geometry in the shader. Chunk streaming keeps only a 9-row band of chunks
+geometry in the shader. Chunk streaming keeps only a 9×9 window of chunks
 resident around the player — the rest are unloaded instantly.
 
 **Custom physics.** A sub-stepped kinematic character controller resolves
@@ -123,8 +123,8 @@ collisions against grid-aligned brick AABBs with axis-by-axis push-out — no
 external engine. Candidate bricks are a tiny grid window around the player, so
 collision cost is effectively constant per frame.
 
-**Numbers (headless demo, 60 Hz simulated step):** 54 resident chunks =
-13,824 bricks, drawn as ≤ 54 instanced draw calls (one per visible chunk) on a
+**Numbers (headless demo, 60 Hz simulated step):** 81 resident chunks =
+20,736 bricks, drawn as ≤ 81 instanced draw calls (one per visible chunk) on a
 single vertex buffer; the wall itself is one mesh.
 
 ## Project layout
@@ -149,10 +149,12 @@ tests/           dependency-free unit tests (grid, store, streaming,
 
 - **Zero runtime allocations**: every container is a fixed pool (see
   `src/game/wall.hpp`).
-- **Infinite vertical wall**: brick/chunk coordinates are unbounded in Y;
-  procedural appearance comes from a deterministic spatial hash, so a chunk can
-  be regenerated losslessly at any time. Player modifications persist across
-  unload/reload via the persistent brick store.
+- **Infinite wall in all directions**: brick/chunk coordinates are unbounded
+  in X and Y; procedural appearance (including each brick's random size class:
+  small 1 m / medium 2.5 m / large 5 m) comes from a deterministic spatial
+  hash, so a chunk can be regenerated losslessly at any time. Player
+  modifications persist across unload/reload via the persistent brick store.
+- **No fall respawn**: falling means falling forever (streaming follows you).
 - **Deterministic demos**: `make demo` (or `./build/atw --headless --frames N`)
   steps at a fixed 60 Hz and prints `fps / frame ms / chunks / instances /
   modified bricks / peak height` every second.

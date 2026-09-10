@@ -117,11 +117,9 @@ public:
         int32_t by = floori(pos.y / BRICK);
         if (by > highestBrickY) highestBrickY = by;
 
-        // ---- fall safety (respawn on top of the wall) ----------------------
-        if (pos.y < -30.0f) {
-            reset(48.0f, 2.0f, 0.5f);
-            wall.streamAround(0);
-        }
+        // No fall respawn: if the player falls they keep falling forever. The
+        // wall is infinite and chunk streaming follows the player, so there
+        // is always wall alongside (and any protruding ledge can break a fall).
     }
 
 private:
@@ -132,10 +130,12 @@ private:
         grounded = false;
         AABB pb = box();
 
-        // Candidate brick grid window (expanded by one cell in every direction).
-        int32_t x0 = floori(pb.mn.x / BRICK) - 1;
+        // Candidate brick grid window. Bricks are corner-anchored and up to
+        // BRICK_SIZE_MAX_CELLS wide, so a brick overlapping the player may
+        // originate that many cells in -X/-Y; +1 cell of margin covers +X/+Y.
+        int32_t x0 = floori(pb.mn.x / BRICK) - BRICK_SIZE_MAX_CELLS;
         int32_t x1 = floori(pb.mx.x / BRICK) + 1;
-        int32_t y0 = floori(pb.mn.y / BRICK) - 1;
+        int32_t y0 = floori(pb.mn.y / BRICK) - BRICK_SIZE_MAX_CELLS;
         int32_t y1 = floori(pb.mx.y / BRICK) + 1;
 
         for (int pass = 0; pass < 3; ++pass) {

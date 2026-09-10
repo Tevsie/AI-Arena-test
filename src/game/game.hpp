@@ -58,10 +58,8 @@ private:
     Renderer renderer_;
     FrameStats stats_;
 
-    bool mouseL_ = false, mouseR_ = false;
     double lastTime_ = 0.0;
-    int32_t lastChunkRow_ = 0;
-    int32_t lastLedgeY_ = 0;
+    ChunkCoord lastChunk_{0, 0};
     bool initialized_ = false;
     TargetResult target_;
 };

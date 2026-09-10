@@ -4,10 +4,12 @@
 #include <cstdint>
 
 #include "../core/math.hpp"
+#include "constants.hpp"
 
 namespace aw {
 
-// Brick grid cell (integer). The wall is finite in X, infinite in Y (vertical).
+// Brick grid cell (integer). The wall is infinite in X (horizontal) and
+// infinite in Y (vertical).
 struct BrickCoord {
     int32_t x = 0, y = 0;
 
@@ -42,16 +44,30 @@ inline int32_t brickLocalIndex(int32_t bx, int32_t by) {
     return ly * CHUNK_X + lx;
 }
 
-// World-space position of a brick's minimum (back) corner. The wall face is at
-// z=0 and the brick material sits BEHIND it (z in [-1, 0]) when flush.
-inline Vec3 brickMin(int32_t bx, int32_t by) {
-    return {float(bx) * BRICK, float(by) * BRICK, -BRICK};
+// Deterministic per-brick size class: small (1 m), medium (2.5 m) or large
+// (5 m) edge length, from a spatial hash. A pure function of coordinates, so
+// the infinite wall regenerates losslessly and every system (collision,
+// raycast, rendering) agrees on a brick's size without storing anything.
+inline float brickSize(int32_t bx, int32_t by) {
+    switch (hash2d(bx, by) % 3u) {
+        case 0: return BRICK_SIZE_SMALL;
+        case 1: return BRICK_SIZE_MEDIUM;
+        default: return BRICK_SIZE_LARGE;
+    }
 }
 
-// World-space AABB of a brick at rest (flush with the wall): z in [-1, 0].
+// World-space position of a brick's minimum corner. The wall face is at z=0
+// and the brick material sits BEHIND it (z in [-s, 0] for size s) when flush.
+// Bricks are corner-anchored: brick (bx,by) spans [bx,bx+s] x [by,by+s].
+inline Vec3 brickMin(int32_t bx, int32_t by) {
+    return {float(bx) * BRICK, float(by) * BRICK, -brickSize(bx, by)};
+}
+
+// World-space AABB of a brick at rest (flush with the wall): z in [-s, 0].
 inline AABB brickAABB(int32_t bx, int32_t by) {
+    float s = brickSize(bx, by);
     Vec3 mn = brickMin(bx, by);
-    return AABB(mn, {mn.x + BRICK, mn.y + BRICK, mn.z + BRICK});
+    return AABB(mn, {mn.x + s, mn.y + s, mn.z + s});
 }
 
 // Project world position to containing brick (floor semantics for negative).

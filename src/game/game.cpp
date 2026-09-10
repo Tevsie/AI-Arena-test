@@ -32,15 +32,19 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
 platformReady:;
 
     // Seed the world: a starting platform the player stands on.
-    for (int32_t bx = 44; bx <= 51; ++bx)
+    float platformTop = 0.0f;
+    for (int32_t bx = 44; bx <= 51; ++bx) {
         wall_.setBrick(bx, -1, STATE_EXTENDED, 1.0f);
+        float top = float(-1) + brickSize(bx, -1);
+        if (top > platformTop) platformTop = top;
+    }
     // A short pre-built step path so the scene has visible ledges immediately.
     for (int32_t i = 0; i < 5; ++i)
         wall_.setBrick(48 + (i % 3), i, STATE_EXTENDED, 0.85f);
 
-    player_.reset(48.0f, 0.0f, 0.5f);
-    lastChunkRow_ = brickToChunk(0, 0).cy;
-    wall_.streamAround(lastChunkRow_);
+    player_.reset(48.0f, platformTop + 0.1f, 0.5f);
+    lastChunk_ = brickToChunk(48, floori(platformTop));
+    wall_.streamAround(lastChunk_.cx, lastChunk_.cy);
 
     if (!headless()) {
         if (!renderer_.init()) {
@@ -66,13 +70,16 @@ void Game::simulateFrame(const FrameInput& in, float dt) {
     player_.update(in, wall_, dt);
 
     target_ = interaction_.cast(player_, wall_);
-    if (mouseL_ && target_.hit) interaction_.pull(wall_, target_, dt);
-    if (mouseR_ && target_.hit) interaction_.push(wall_, player_, target_, dt);
+    // Clicks (edge events) start 3 s in/out lerps; update() advances them.
+    if (in.mousePressed[MBTN_LEFT] && target_.hit) interaction_.pull(wall_, target_);
+    if (in.mousePressed[MBTN_RIGHT] && target_.hit) interaction_.push(wall_, player_, target_);
+    interaction_.update(wall_, player_, dt);
 
-    int32_t row = brickToChunk(0, floori(player_.pos.y / BRICK)).cy;
-    if (row != lastChunkRow_) {
-        lastChunkRow_ = row;
-        wall_.streamAround(row);
+    BrickCoord pb = worldToBrick(player_.pos);
+    ChunkCoord pc = brickToChunk(pb.x, pb.y);
+    if (pc != lastChunk_) {
+        lastChunk_ = pc;
+        wall_.streamAround(pc.cx, pc.cy);
     }
 
     stats_.residentChunks = wall_.residentCount();
@@ -104,10 +111,6 @@ void Game::run() {
         FrameInput in;
         bool alive = platform_->frame(in);
         if (!alive || in.shouldQuit) break;
-
-        // Hold-state from edge events.
-        mouseL_ = (in.mousePressed[MBTN_LEFT] || mouseL_) && !in.mouseReleased[MBTN_LEFT];
-        mouseR_ = (in.mousePressed[MBTN_RIGHT] || mouseR_) && !in.mouseReleased[MBTN_RIGHT];
 
         if (headless()) demoDrive(dt);
 
@@ -155,14 +158,27 @@ void Game::demoDrive(float dt) {
 
     int32_t tick = stats_.frame;
 
-    // Climb one brick every 24 frames (~2.5 bricks/sec); snap onto the ledge so
-    // the controller rests on it (grounded) between steps.
+    // Climb one ledge every 24 frames; extend the brick at the player's feet
+    // and snap onto the tallest supporting ledge under the footprint so the
+    // controller rests on it (grounded) between steps. Brick tops vary with
+    // size (1/2.5/5 m) and older large ledges can tower above the new one, so
+    // the support height is measured, not assumed (sizes >= 1 m keep the
+    // climb monotonic).
     if (tick % 24 == 0 && tick > 0) {
-        int32_t ny = lastLedgeY_ + 1;
-        wall_.setBrick(48, ny - 1, STATE_EXTENDED, 1.0f);
-        player_.pos.y = float(ny);
+        int32_t row = floori(player_.pos.y / BRICK);
+        wall_.setBrick(48, row, STATE_EXTENDED, 1.0f);
+        float top = float(row) + brickSize(48, row);
+        for (int32_t bx = 43; bx <= 48; ++bx) {
+            for (int32_t by = row - 5; by <= row; ++by) {
+                if (wall_.brickDepth(bx, by) <= 0.0f) continue;  // flush: no z overlap
+                AABB b = wall_.brickAABB(bx, by);
+                if (b.mx.x > 48.0f - PLAYER_HALF_W && b.mn.x < 48.0f + PLAYER_HALF_W &&
+                    b.mx.y > top)
+                    top = b.mx.y;
+            }
+        }
+        player_.pos = {48.0f, top, 0.5f};
         player_.vel = {0, 0, 0};
-        lastLedgeY_ = ny;
     }
 
     if (tick % 20 == 0) {
