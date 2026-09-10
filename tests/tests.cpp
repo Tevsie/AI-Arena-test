@@ -424,23 +424,29 @@ static void testSettings() {
     Settings s;
     CHECK_NEAR(s.volume, 0.8, 1e-6);
     CHECK_NEAR(s.sensitivity, 1.0, 1e-6);
+    CHECK_NEAR(s.fov, FOV_DEG, 1e-6);
     // clamping
-    s.volume = 2.0f; s.sensitivity = -1.0f; s.width = 10; s.height = 99999;
+    s.volume = 2.0f; s.sensitivity = -1.0f; s.fov = 200.0f; s.width = 10; s.height = 99999;
     s.clamp();
     CHECK_NEAR(s.volume, 1.0, 1e-6);
     CHECK_NEAR(s.sensitivity, 0.1, 1e-6);
+    CHECK_NEAR(s.fov, 120.0, 1e-6);
+    s.fov = 10.0f;
+    s.clamp();
+    CHECK_NEAR(s.fov, 60.0, 1e-6);
     CHECK(s.width == 320);
     CHECK(s.height == 4320);
     // serialize/parse roundtrip
     Settings a;
-    a.volume = 0.35f; a.sensitivity = 2.5f; a.width = 1920; a.height = 1080;
+    a.volume = 0.35f; a.sensitivity = 2.5f; a.fov = 90.0f; a.width = 1920; a.height = 1080;
     a.fullscreen = true;
-    char buf[256];
+    char buf[512];
     a.serialize(buf, sizeof(buf));
     Settings b;
     CHECK(b.parse(buf));
     CHECK_NEAR(b.volume, 0.35, 1e-3);
     CHECK_NEAR(b.sensitivity, 2.5, 1e-3);
+    CHECK_NEAR(b.fov, 90.0, 1e-3);
     CHECK(b.width == 1920 && b.height == 1080);
     CHECK(b.fullscreen);
     CHECK(!Settings().fullscreen);
@@ -449,6 +455,7 @@ static void testSettings() {
     CHECK(c.parse("bogus=123\nvolume=0.5\n"));
     CHECK_NEAR(c.volume, 0.5, 1e-6);
     CHECK_NEAR(c.sensitivity, 1.0, 1e-6);
+    CHECK_NEAR(c.fov, FOV_DEG, 1e-6);
     // resolution modes
     CHECK(a.modeIndex() == 2);
     a.setMode(0);
@@ -487,21 +494,21 @@ static void testMenuNav() {
         if (key) in.keys[key] = 1;
         m.update(in, s, audio, *plat);
     };
-    // Down x4 -> Restart; Enter -> restart flag.
-    for (int i = 0; i < 4; ++i) { frame(KEY_DOWN); frame(0); }
+    // Down x5 -> Restart; Enter -> restart flag.
+    for (int i = 0; i < 5; ++i) { frame(KEY_DOWN); frame(0); }
     CHECK(m.selected() == Menu::Restart);
     frame(KEY_ENTER); frame(0);
     CHECK(m.consumeRestart());
     CHECK(!m.consumeRestart());
     // Up wraps to the top (volume); Right raises the volume bar.
-    for (int i = 0; i < 4; ++i) { frame(KEY_UP); frame(0); }
+    for (int i = 0; i < 5; ++i) { frame(KEY_UP); frame(0); }
     CHECK(m.selected() == Menu::Volume);
     float v0 = s.volume;
     frame(KEY_RIGHT); frame(0);
     CHECK(s.volume > v0);
     frame(KEY_LEFT); frame(0);
     CHECK_NEAR(s.volume, v0, 1e-6);
-    // Resolution cycles + resizes the backend.
+    // Resolution cycles + resizes the backend (when not fullscreen).
     frame(KEY_DOWN); frame(0);
     CHECK(m.selected() == Menu::Resolution);
     int w0 = s.width;
@@ -510,8 +517,20 @@ static void testMenuNav() {
     FrameInput probe = zeroInput();
     plat->frame(probe);
     CHECK(probe.width == s.width && probe.height == s.height);
-    // Fullscreen toggles via Enter and arrows (headless backend ignores it).
+    // Sensitivity + FOV sliders.
     frame(KEY_DOWN); frame(0);  // sensitivity
+    CHECK(m.selected() == Menu::Sensitivity);
+    float sens0 = s.sensitivity;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.sensitivity > sens0);
+    frame(KEY_DOWN); frame(0);  // fov
+    CHECK(m.selected() == Menu::Fov);
+    float fov0 = s.fov;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.fov > fov0);
+    frame(KEY_LEFT); frame(0);
+    CHECK_NEAR(s.fov, fov0, 1e-6);
+    // Fullscreen toggles via Enter and arrows (headless backend ignores it).
     frame(KEY_DOWN); frame(0);  // fullscreen
     CHECK(m.selected() == Menu::Fullscreen);
     CHECK(!s.fullscreen);
@@ -521,6 +540,34 @@ static void testMenuNav() {
     CHECK(!s.fullscreen);
     frame(KEY_RIGHT); frame(0);
     CHECK(s.fullscreen);
+    // While fullscreen, resolution change should NOT resize the backend.
+    frame(KEY_UP); frame(0);  // fov
+    frame(KEY_UP); frame(0);  // sensitivity
+    frame(KEY_UP); frame(0);  // resolution
+    CHECK(m.selected() == Menu::Resolution);
+    int fw = s.width;
+    FrameInput before = zeroInput();
+    plat->frame(before);
+    frame(KEY_RIGHT); frame(0); // change res while fullscreen
+    CHECK(s.width != fw);
+    FrameInput after = zeroInput();
+    plat->frame(after);
+    // Menu fix: when fullscreen, backend size stays unchanged (monitor size).
+    // Headless backend still tracks fullscreen, so width should stay same as before.
+    // If backend ignores fullscreen, it would have resized — we check it did NOT.
+    // For headless we made it respect fullscreen? Actually headless ignores fullscreen
+    // in setFullscreen, but menu prevents resize call when fullscreen, so width stays.
+    CHECK(after.width == before.width);
+    // Exit fullscreen -> should resize to stored windowed size.
+    frame(KEY_DOWN); frame(0); // sensitivity
+    frame(KEY_DOWN); frame(0); // fov
+    frame(KEY_DOWN); frame(0); // fullscreen
+    CHECK(m.selected() == Menu::Fullscreen);
+    frame(KEY_ENTER); frame(0); // off
+    CHECK(!s.fullscreen);
+    FrameInput restored = zeroInput();
+    plat->frame(restored);
+    CHECK(restored.width == s.width && restored.height == s.height);
     // Quit via keyboard.
     frame(KEY_DOWN); frame(0);  // restart
     frame(KEY_DOWN); frame(0);  // resume

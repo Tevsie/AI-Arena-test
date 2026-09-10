@@ -38,9 +38,11 @@ public:
     void swapBuffers() override {}
     void shutdown() override {}
     void resize(int w, int h) override {
-        if (w > 0 && h > 0) { width_ = w; height_ = h; }
+        if (w <= 0 || h <= 0) return;
+        if (fullscreen_) return;
+        width_ = w; height_ = h;
     }
-    void setFullscreen(bool) override {}
+    void setFullscreen(bool on) override { fullscreen_ = on; }
     BackendInfo info() const override {
         BackendInfo b;
         b.hasWindow = false;
@@ -57,6 +59,7 @@ private:
     int width_ = 1280, height_ = 720;
     int frame_ = 0;
     int maxFrames_ = kHeadlessMaxFramesDefault;
+    bool fullscreen_ = false;
 };
 
 Platform* createHeadlessPlatform() { return new PlatformHeadless(); }

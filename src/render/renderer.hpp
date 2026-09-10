@@ -20,10 +20,11 @@ public:
     bool init();
     void shutdown();
 
-    // Draw a frame. `viewProj` is proj*view; `aspect` = w/h.
+    // Draw a frame. `viewProj` is proj*view; `aspect` = w/h; `fovDeg` is vertical FOV.
     // Returns the number of brick instances actually drawn (after culling).
     int render(const Wall& wall, const Player& player, const Mat4& viewProj,
-               float aspect, int width, int height, bool targetHot);
+               float aspect, int width, int height, bool targetHot,
+               float fovDeg = FOV_DEG);
 
     // Immediate-mode UI overlay (settings menu). Coordinates are pixels with a
     // top-left origin; text uses the embedded 5x7 font (see font.hpp).

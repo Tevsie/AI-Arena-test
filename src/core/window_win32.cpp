@@ -202,6 +202,13 @@ public:
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
+        // Do not resize the window while in borderless fullscreen; the
+        // fullscreen window covers the monitor and its size is monitor-driven.
+        // The desired windowed size is stored in Settings and will be applied
+        // when exiting fullscreen.
+        if (fullscreen_) {
+            return;
+        }
         width_ = w; height_ = h;
         mouseX_ = w / 2; mouseY_ = h / 2;
         if (!hwnd_) return;

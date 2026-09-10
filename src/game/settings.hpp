@@ -1,13 +1,15 @@
 // settings.hpp — user settings (master volume, resolution, mouse sensitivity,
-// fullscreen) with clamping and persistence to a small key=value text file.
+// fov, fullscreen) with clamping and persistence to a small key=value text file.
 //
 // The menu edits these live; the game applies them immediately (audio gain,
-// window size, look scale) and saves on menu close / quit / restart.
+// window size, look scale, fov) and saves on menu close / quit / restart.
 #pragma once
 
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+
+#include "constants.hpp"
 
 namespace aw {
 
@@ -24,6 +26,7 @@ struct Settings {
 
     float volume = 0.8f;       // master gain, 0..1
     float sensitivity = 1.0f;  // mouse look multiplier, 0.1..3.0
+    float fov = FOV_DEG;       // vertical field of view in degrees, 60..120
     int width = 1280, height = 720;
     bool fullscreen = false;
 
@@ -32,6 +35,8 @@ struct Settings {
         if (volume > 1.0f) volume = 1.0f;
         if (sensitivity < 0.1f) sensitivity = 0.1f;
         if (sensitivity > 3.0f) sensitivity = 3.0f;
+        if (fov < 60.0f) fov = 60.0f;
+        if (fov > 120.0f) fov = 120.0f;
         if (width < 320) width = 320;
         if (height < 200) height = 200;
         if (width > 7680) width = 7680;
@@ -68,8 +73,9 @@ struct Settings {
     // Serialize to / parse from "key=value" lines. Unknown keys are ignored;
     // missing keys keep their current values. Used by load/save and by tests.
     void serialize(char* out, size_t n) const {
-        std::snprintf(out, n, "volume=%.3f\nsensitivity=%.3f\nwidth=%d\nheight=%d\nfullscreen=%d\n",
-                      double(volume), double(sensitivity), width, height,
+        std::snprintf(out, n,
+                      "volume=%.3f\nsensitivity=%.3f\nfov=%.3f\nwidth=%d\nheight=%d\nfullscreen=%d\n",
+                      double(volume), double(sensitivity), double(fov), width, height,
                       fullscreen ? 1 : 0);
     }
 
@@ -87,6 +93,7 @@ struct Settings {
             int v = 0;
             if (std::sscanf(line, "volume=%f", &f) == 1) volume = f;
             else if (std::sscanf(line, "sensitivity=%f", &f) == 1) sensitivity = f;
+            else if (std::sscanf(line, "fov=%f", &f) == 1) fov = f;
             else if (std::sscanf(line, "width=%d", &v) == 1) width = v;
             else if (std::sscanf(line, "height=%d", &v) == 1) height = v;
             else if (std::sscanf(line, "fullscreen=%d", &v) == 1) fullscreen = v != 0;
@@ -108,7 +115,7 @@ struct Settings {
     bool save(const char* path = kDefaultPath) const {
         FILE* f = std::fopen(path, "wb");
         if (!f) return false;
-        char buf[256];
+        char buf[512];
         serialize(buf, sizeof(buf));
         size_t n = std::strlen(buf);
         size_t wrote = std::fwrite(buf, 1, n, f);

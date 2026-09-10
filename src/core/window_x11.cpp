@@ -457,6 +457,13 @@ public:
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
+        // While in fullscreen the window size is driven by the window manager
+        // (monitor size). Changing the stored windowed resolution should not
+        // resize the fullscreen window; the new size will be applied when
+        // exiting fullscreen via an explicit resize() call from the menu.
+        if (fullscreen_) {
+            return;
+        }
         // Apply immediately so the next frame already uses the new size (the
         // async ConfigureNotify confirms it afterwards).
         width_ = w; height_ = h;
@@ -469,6 +476,8 @@ public:
 
     void setFullscreen(bool on) override {
         if (!dpy_ || !x_.XSendEvent || !x_.XInternAtom) return;
+        if (fullscreen_ == on) return;
+        fullscreen_ = on;
         // EWMH fullscreen: a _NET_WM_STATE client message to the root window.
         x11::Atom wmState = x_.XInternAtom(dpy_, "_NET_WM_STATE", 0);
         x11::Atom fs = x_.XInternAtom(dpy_, "_NET_WM_STATE_FULLSCREEN", 0);
@@ -509,6 +518,7 @@ private:
     int warpX_ = 0, warpY_ = 0;
     int mouseX_ = 0, mouseY_ = 0;
     bool captured_ = false;
+    bool fullscreen_ = false;
 };
 
 Platform* createPlatform() { return new PlatformX11(); }

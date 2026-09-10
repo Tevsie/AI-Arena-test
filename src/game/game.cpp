@@ -190,12 +190,15 @@ void Game::run() {
         if (!headless()) {
             float aspect = in.width > 0 && in.height > 0 ? float(in.width) / float(in.height)
                                                          : 16.0f / 9.0f;
-            Mat4 proj = Mat4::perspective(deg2rad(FOV_DEG), aspect, NEAR_PLANE, FAR_PLANE);
+            float fov = settings_.fov;
+            if (fov < 60.0f) fov = 60.0f;
+            if (fov > 120.0f) fov = 120.0f;
+            Mat4 proj = Mat4::perspective(deg2rad(fov), aspect, NEAR_PLANE, FAR_PLANE);
             Vec3 eye = player_.eye();
             Mat4 view = Mat4::lookAt(eye, eye + player_.forward(), {0, 1, 0});
             Mat4 vp = proj * view;
             stats_.drawnInstances =
-                renderer_.render(wall_, player_, vp, aspect, in.width, in.height, target_.hit);
+                renderer_.render(wall_, player_, vp, aspect, in.width, in.height, target_.hit, fov);
             if (menuOpen_) {
                 renderer_.uiBegin(in.width, in.height);
                 menu_.render(renderer_);
