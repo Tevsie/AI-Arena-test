@@ -1,0 +1,72 @@
+name: build
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install MinGW cross-compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64
+
+      - name: Build + test (Linux)
+        run: |
+          make all
+          ./build/atw_tests
+          ./build/atw --headless --frames 300
+
+      - name: Build Windows .exe (MinGW)
+        id: winbuild
+        shell: bash
+        run: |
+          set +e
+          x86_64-w64-mingw32-g++ -std=c++20 -O3 -ffast-math -Wall -Wextra -mwindows -static \
+            -o atw.exe src/main.cpp src/core/window_win32.cpp src/core/window_headless.cpp \
+            src/render/gl.cpp src/render/renderer.cpp src/game/game.cpp \
+            -lopengl32 -lgdi32 -luser32 -static-libgcc -static-libstdc++ > winbuild.log 2>&1
+          code=$?
+          cat winbuild.log
+          echo "exit=$code" >> winbuild.log
+          exit $code
+
+      - name: Upload Windows build log (CI debug)
+        if: failure()
+        shell: bash
+        run: |
+          git config user.name  "CI"
+          git config user.email "ci@users.noreply.github.com"
+          git add -f winbuild.log
+          git commit -m "winbuild log" || true
+          git push origin "HEAD:ci/logs" --force || true
+
+      - name: Upload binaries
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: against-the-wall
+          path: |
+            atw.exe
+            build/atw
+          if-no-files-found: ignore
+
+      - name: Create GitHub Release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: atw.exe
+          name: Against the Wall ${{ github.ref_name }}
+          body: |
+            Windows .exe build of the Against the Wall C++20 prototype.
+
+            Download `atw.exe` and double-click to play. Requires a Windows 10/11
+            GPU driver with OpenGL 3.3 support (any standard Intel/NVIDIA/AMD
+            driver). If SmartScreen warns, click **More info** → **Run anyway**.
