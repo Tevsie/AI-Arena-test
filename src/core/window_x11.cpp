@@ -53,6 +53,7 @@ using XLookupKeysymFn = KeySym (*)(void*, int);
 using XKeysymToKeycodeFn = unsigned (*)(Display*, KeySym);
 using XWarpPointerFn = int (*)(Display*, Window, Window, int, int, unsigned, unsigned, int, int);
 using XResizeWindowFn = int (*)(Display*, Window, unsigned, unsigned);
+using XSendEventFn = int (*)(Display*, Window, int, long, XEvent*);
 using XQueryPointerFn = int (*)(Display*, Window, Window*, Window*, int*, int*, int*, int*, unsigned*);
 using XGrabPointerFn = int (*)(Display*, Window, int, unsigned, int, int, Window, Cursor, Time);
 using XUngrabPointerFn = int (*)(Display*, Time);
@@ -139,6 +140,7 @@ struct XLib {
     x11::XKeysymToKeycodeFn XKeysymToKeycode = nullptr;
     x11::XWarpPointerFn XWarpPointer = nullptr;
     x11::XResizeWindowFn XResizeWindow = nullptr;
+    x11::XSendEventFn XSendEvent = nullptr;
     x11::XQueryPointerFn XQueryPointer = nullptr;
     x11::XGrabPointerFn XGrabPointer = nullptr;
     x11::XUngrabPointerFn XUngrabPointer = nullptr;
@@ -182,6 +184,7 @@ struct XLib {
         LD(hX11, XKeysymToKeycode, "XKeysymToKeycode");
         LD(hX11, XWarpPointer, "XWarpPointer");
         LD(hX11, XResizeWindow, "XResizeWindow");
+        LD(hX11, XSendEvent, "XSendEvent");
         LD(hX11, XQueryPointer, "XQueryPointer");
         LD(hX11, XGrabPointer, "XGrabPointer");
         LD(hX11, XUngrabPointer, "XUngrabPointer");
@@ -462,6 +465,30 @@ public:
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
             if (x_.XSync) x_.XSync(dpy_, 0);
         }
+    }
+
+    void setFullscreen(bool on) override {
+        if (!dpy_ || !x_.XSendEvent || !x_.XInternAtom) return;
+        // EWMH fullscreen: a _NET_WM_STATE client message to the root window.
+        x11::Atom wmState = x_.XInternAtom(dpy_, "_NET_WM_STATE", 0);
+        x11::Atom fs = x_.XInternAtom(dpy_, "_NET_WM_STATE_FULLSCREEN", 0);
+        if (!wmState || !fs) return;
+        struct FullscreenMsg {
+            int type; unsigned long serial; int send_event; x11::Display* display;
+            x11::Window window; x11::Atom message_type; int format; long data[5];
+        } msg{};
+        msg.type = ClientMessage;
+        msg.window = win_;
+        msg.message_type = wmState;
+        msg.format = 32;
+        msg.data[0] = on ? 1 : 0;   // _NET_WM_STATE_ADD : _NET_WM_STATE_REMOVE
+        msg.data[1] = (long)fs;
+        int screen = x_.XDefaultScreen(dpy_);
+        x11::Window root = x_.XRootWindow(dpy_, screen);
+        constexpr long kSubstructure = (1L << 20) | (1L << 21);  // Redirect|Notify
+        x_.XSendEvent(dpy_, root, 0, kSubstructure, reinterpret_cast<x11::XEvent*>(&msg));
+        if (x_.XSync) x_.XSync(dpy_, 0);
+        // The window manager resizes the window; ConfigureNotify syncs width_/height_.
     }
 
     void* loadGLProc(const char* name) override {

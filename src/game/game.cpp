@@ -39,6 +39,7 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
         return false;
     }
 platformReady:;
+    if (settings_.fullscreen) platform_->setFullscreen(true);
 
     float platformTop = seedWorld();
     player_.reset(48.0f, platformTop + 0.1f, 0.5f);
@@ -147,8 +148,8 @@ void Game::run() {
         bool alive = platform_->frame(in);
         if (!alive || in.shouldQuit) break;
 
-        // Esc toggles the settings menu (windowed only); the simulation pauses
-        // while it is open.
+        // Esc toggles the settings menu (real window only: windowed or
+        // fullscreen); the simulation pauses while it is open.
         bool esc = in.keys[KEY_ESC] != 0;
         if (esc && !prevEsc_ && !headless()) {
             menuOpen_ = !menuOpen_;

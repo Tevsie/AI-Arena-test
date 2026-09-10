@@ -345,6 +345,7 @@ static void testSettings() {
     // serialize/parse roundtrip
     Settings a;
     a.volume = 0.35f; a.sensitivity = 2.5f; a.width = 1920; a.height = 1080;
+    a.fullscreen = true;
     char buf[256];
     a.serialize(buf, sizeof(buf));
     Settings b;
@@ -352,6 +353,8 @@ static void testSettings() {
     CHECK_NEAR(b.volume, 0.35, 1e-3);
     CHECK_NEAR(b.sensitivity, 2.5, 1e-3);
     CHECK(b.width == 1920 && b.height == 1080);
+    CHECK(b.fullscreen);
+    CHECK(!Settings().fullscreen);
     // unknown keys ignored, missing keys keep their values
     Settings c;
     CHECK(c.parse("bogus=123\nvolume=0.5\n"));
@@ -395,16 +398,14 @@ static void testMenuNav() {
         if (key) in.keys[key] = 1;
         m.update(in, s, audio, *plat);
     };
-    // Down x3 -> Restart; Enter -> restart flag.
-    frame(KEY_DOWN); frame(0);
-    frame(KEY_DOWN); frame(0);
-    frame(KEY_DOWN); frame(0);
+    // Down x4 -> Restart; Enter -> restart flag.
+    for (int i = 0; i < 4; ++i) { frame(KEY_DOWN); frame(0); }
     CHECK(m.selected() == Menu::Restart);
     frame(KEY_ENTER); frame(0);
     CHECK(m.consumeRestart());
     CHECK(!m.consumeRestart());
     // Up wraps to the top (volume); Right raises the volume bar.
-    for (int i = 0; i < 3; ++i) { frame(KEY_UP); frame(0); }
+    for (int i = 0; i < 4; ++i) { frame(KEY_UP); frame(0); }
     CHECK(m.selected() == Menu::Volume);
     float v0 = s.volume;
     frame(KEY_RIGHT); frame(0);
@@ -420,8 +421,18 @@ static void testMenuNav() {
     FrameInput probe = zeroInput();
     plat->frame(probe);
     CHECK(probe.width == s.width && probe.height == s.height);
-    // Quit via keyboard.
+    // Fullscreen toggles via Enter and arrows (headless backend ignores it).
     frame(KEY_DOWN); frame(0);  // sensitivity
+    frame(KEY_DOWN); frame(0);  // fullscreen
+    CHECK(m.selected() == Menu::Fullscreen);
+    CHECK(!s.fullscreen);
+    frame(KEY_ENTER); frame(0);
+    CHECK(s.fullscreen);
+    frame(KEY_LEFT); frame(0);
+    CHECK(!s.fullscreen);
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.fullscreen);
+    // Quit via keyboard.
     frame(KEY_DOWN); frame(0);  // restart
     frame(KEY_DOWN); frame(0);  // resume
     frame(KEY_DOWN); frame(0);  // quit

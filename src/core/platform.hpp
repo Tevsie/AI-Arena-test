@@ -55,6 +55,9 @@ public:
     // size is reported back through FrameInput in subsequent frames.
     virtual void resize(int width, int height) = 0;
 
+    // Borderless fullscreen toggle (used by the fullscreen setting).
+    virtual void setFullscreen(bool on) = 0;
+
     // GL function loading (no-op on headless). Returns nullptr if not loaded.
     virtual void* loadGLProc(const char* name) = 0;
 };

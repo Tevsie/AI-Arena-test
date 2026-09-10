@@ -89,13 +89,17 @@ fully testable and benchmarkable on machines without a display or GPU.
 ## Settings, menu & audio
 
 - `Esc` pauses the game and opens the settings overlay (volume bar, resolution
-  picker, sensitivity bar, Restart / Resume / Quit). The menu is driven by
+  picker, sensitivity bar, fullscreen toggle, Restart / Resume / Quit). The
+  menu is driven by
   mouse (hover + click + slider drag; backends report absolute cursor position)
   and keyboard (arrows + Enter), drawn with the renderer's immediate-mode UI
   pass (colored rects + an embedded 5x7 bitmap font atlas — no font files).
-- Settings apply live (mixer gain, `Platform::resize`, look scale) and persist
-  to `settings.cfg`. Restart clears the brick store, cancels lerps, reseeds
-  the starting platform and respawns the player.
+- Settings apply live (mixer gain, `Platform::resize`, look scale,
+  `Platform::setFullscreen`) and persist to `settings.cfg`. Restart clears
+  the brick store, cancels lerps, reseeds the starting platform and respawns
+  the player. Fullscreen is EWMH (`_NET_WM_STATE`) on X11, borderless
+  monitor-cover on Win32, and a no-op headless; the saved choice is applied
+  at startup.
 - Audio is a tiny procedural engine: a mixer thread renders up to 8
   synthesized one-shots (48 kHz stereo int16) into a platform backend — WinMM
   on Windows, PulseAudio-simple with an ALSA fallback on Linux (both `dlopen`,

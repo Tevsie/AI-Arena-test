@@ -211,6 +211,34 @@ public:
                      SWP_NOMOVE | SWP_NOZORDER);
     }
 
+    void setFullscreen(bool on) override {
+        if (fullscreen_ == on) return;
+        fullscreen_ = on;
+        if (!hwnd_) return;
+        if (on) {
+            // Borderless window covering the current monitor (WM_SIZE syncs w/h).
+            GetWindowRect(hwnd_, &savedRect_);
+            savedStyle_ = GetWindowLongA(hwnd_, GWL_STYLE);
+            SetWindowLongA(hwnd_, GWL_STYLE, (savedStyle_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
+            HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoA(mon, &mi)) {
+                SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                             mi.rcMonitor.right - mi.rcMonitor.left,
+                             mi.rcMonitor.bottom - mi.rcMonitor.top,
+                             SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+            }
+        } else {
+            SetWindowLongA(hwnd_, GWL_STYLE, savedStyle_);
+            SetWindowPos(hwnd_, nullptr, savedRect_.left, savedRect_.top,
+                         savedRect_.right - savedRect_.left,
+                         savedRect_.bottom - savedRect_.top,
+                         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
+            ShowWindow(hwnd_, SW_RESTORE);
+        }
+    }
+
     void* loadGLProc(const char* name) override {
         void* p = reinterpret_cast<void*>(wglGetProcAddress(name));
         if (!p && hGL_) p = reinterpret_cast<void*>(GetProcAddress(hGL_, name));
@@ -291,6 +319,9 @@ private:
     int mouseX_ = 0, mouseY_ = 0;
     int centerX_ = 0, centerY_ = 0, screenCX_ = 0, screenCY_ = 0;
     bool captured_ = false, shouldQuit_ = false;
+    bool fullscreen_ = false;
+    RECT savedRect_{};
+    LONG savedStyle_ = 0;
 };
 
 Platform* createPlatform() { return new PlatformWin32(); }

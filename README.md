@@ -31,7 +31,7 @@ code is pushed.
 > `atw.exe` is fully self-contained (x64, no install). It needs a standard
 > Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
 > AMD driver). If SmartScreen warns on first run, click **More info →
-> Run anyway**. Press `Esc` for the settings menu (volume, resolution,
+> Run anyway**. Press `Esc` for the settings menu (volume, resolution, fullscreen,
 > sensitivity, restart, quit).
 
 ### Build the .exe yourself on Windows (optional)
@@ -103,6 +103,7 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 | Master volume bar    | 0–100 % loudness for all procedural sound effects         |
 | Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440  |
 | Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
+| Fullscreen           | Borderless fullscreen toggle (`ON` / `OFF`)               |
 | **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
 | Resume / Quit        | Close the menu / exit the game                            |
 
@@ -157,7 +158,7 @@ src/
                  font.hpp (embedded 5x7 menu font)
   game/          constants, grid/chunk/wall (streaming + brick store),
                  player (kinematic controller), interaction (raycast pull/push),
-                 settings (volume/resolution/sensitivity + persistence),
+                 settings (volume/resolution/sensitivity/fullscreen + persistence),
                  menu (pause/settings overlay), game.cpp (loop + demo driver)
   audio/         procedural SFX mixer + synth, WinMM / PulseAudio / ALSA backends
 tests/           dependency-free unit tests (grid, store, streaming,

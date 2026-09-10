@@ -1,5 +1,5 @@
-// settings.hpp — user settings (master volume, resolution, mouse sensitivity)
-// with clamping and persistence to a small key=value text file.
+// settings.hpp — user settings (master volume, resolution, mouse sensitivity,
+// fullscreen) with clamping and persistence to a small key=value text file.
 //
 // The menu edits these live; the game applies them immediately (audio gain,
 // window size, look scale) and saves on menu close / quit / restart.
@@ -25,6 +25,7 @@ struct Settings {
     float volume = 0.8f;       // master gain, 0..1
     float sensitivity = 1.0f;  // mouse look multiplier, 0.1..3.0
     int width = 1280, height = 720;
+    bool fullscreen = false;
 
     void clamp() {
         if (volume < 0.0f) volume = 0.0f;
@@ -67,8 +68,9 @@ struct Settings {
     // Serialize to / parse from "key=value" lines. Unknown keys are ignored;
     // missing keys keep their current values. Used by load/save and by tests.
     void serialize(char* out, size_t n) const {
-        std::snprintf(out, n, "volume=%.3f\nsensitivity=%.3f\nwidth=%d\nheight=%d\n",
-                      double(volume), double(sensitivity), width, height);
+        std::snprintf(out, n, "volume=%.3f\nsensitivity=%.3f\nwidth=%d\nheight=%d\nfullscreen=%d\n",
+                      double(volume), double(sensitivity), width, height,
+                      fullscreen ? 1 : 0);
     }
 
     bool parse(const char* text) {
@@ -87,6 +89,7 @@ struct Settings {
             else if (std::sscanf(line, "sensitivity=%f", &f) == 1) sensitivity = f;
             else if (std::sscanf(line, "width=%d", &v) == 1) width = v;
             else if (std::sscanf(line, "height=%d", &v) == 1) height = v;
+            else if (std::sscanf(line, "fullscreen=%d", &v) == 1) fullscreen = v != 0;
         }
         clamp();
         return true;

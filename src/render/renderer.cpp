@@ -374,14 +374,21 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                 int32_t by = oy + (i / CHUNK_X);
                 float d = wall.brickDepth(bx, by);
                 float s = brickSize(bx, by);
+                // Micro-jitter (visual only, collision stays exact): overlapping
+                // bricks share coplanar faces that z-fight and flicker, so each
+                // brick is nudged by a deterministic sub-2cm hash offset.
+                uint32_t jh = hash2d(bx ^ 0x1234, by ^ 0x5678);
+                float jx = float((jh >> 0) & 7u) * 0.0025f;
+                float jy = float((jh >> 3) & 7u) * 0.0025f;
+                float jz = float((jh >> 6) & 7u) * 0.0025f;
                 Instance& inst = staging_[i];
                 std::memset(inst.model, 0, sizeof(inst.model));
                 inst.model[0] = s;
                 inst.model[5] = s;
                 inst.model[10] = s;
-                inst.model[12] = float(bx) + s * 0.5f;
-                inst.model[13] = float(by) + s * 0.5f;
-                inst.model[14] = d - s * 0.5f;   // rigid slide outward (+Z)
+                inst.model[12] = float(bx) + s * 0.5f + jx;
+                inst.model[13] = float(by) + s * 0.5f + jy;
+                inst.model[14] = d - s * 0.5f + jz;   // rigid slide outward (+Z)
                 inst.model[15] = 1.0f;
                 inst.shade = float(ch.shade[i]);
             }
@@ -502,12 +509,13 @@ void Renderer::uiText(float x, float y, int scale,
     for (const char* p = text; *p; ++p, cx += gw) {
         unsigned char c = (unsigned char)*p;
         if (c >= 128) continue;
-        // Glyph occupies cell bytes x+1..x+6 (alpha from the baked atlas).
-        float u0 = (float((c % 16) * 8)) / 128.0f;
-        float v1 = 1.0f - (float((c / 16) * 8)) / 64.0f;  // texture row 0 is the top
+        // Atlas data row 0 uploads to v=0 (bottom), so a glyph's top art sits
+        // at the LOW-v edge of its cell. Exact 6x8 spans keep NEAREST 1:1.
+        float u0 = float((c % 16) * 8) / 128.0f;
         float u1 = u0 + 6.0f / 128.0f;
-        float v0 = v1 - 8.0f / 64.0f;
-        float v[16] = {0, 0, u0, v1, 1, 0, u1, v1, 0, 1, u0, v0, 1, 1, u1, v0};
+        float vTop = float((c / 16) * 8) / 64.0f;
+        float vBot = vTop + 8.0f / 64.0f;
+        float v[16] = {0, 0, u0, vTop, 1, 0, u1, vTop, 0, 1, u0, vBot, 1, 1, u1, vBot};
         gl.BufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
         gl.Uniform4f(uiTextDst_, cx, y, gw, gh);
         gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
