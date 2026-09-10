@@ -20,13 +20,17 @@ set(ATW_RENDER
 set(ATW_GAME
     src/game/game.cpp
 )
+set(ATW_AUDIO
+    src/audio/audio.cpp
+    src/audio/audio_linux.cpp
+)
 
-add_executable(atw src/main.cpp ${ATW_CORE} ${ATW_RENDER} ${ATW_GAME})
+add_executable(atw src/main.cpp ${ATW_CORE} ${ATW_RENDER} ${ATW_GAME} ${ATW_AUDIO})
 target_compile_options(atw PRIVATE -O3 -ffast-math -Wall -Wextra)
 target_link_libraries(atw PRIVATE dl)
 
 enable_testing()
-add_executable(atw_tests tests/tests.cpp ${ATW_CORE} ${ATW_RENDER} ${ATW_GAME})
+add_executable(atw_tests tests/tests.cpp ${ATW_CORE} ${ATW_RENDER} ${ATW_GAME} ${ATW_AUDIO})
 target_include_directories(atw_tests PRIVATE .)
 target_compile_options(atw_tests PRIVATE -O2 -Wall -Wextra)
 target_link_libraries(atw_tests PRIVATE dl)

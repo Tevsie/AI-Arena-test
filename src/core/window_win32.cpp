@@ -50,10 +50,12 @@ uint32_t vkToKey(WPARAM vk) {
         case VK_ESCAPE:  return KEY_ESC;     // 0x11B
         case VK_SHIFT:   return KEY_SHIFT;   // 0x1E1
         case VK_CONTROL: return KEY_CTRL;    // 0x1E3
-        case VK_LEFT:
-        case VK_RIGHT:
-        case VK_UP:
-        case VK_DOWN:    return 0x1F0;       // reserved, unused by the game
+        case VK_TAB:     return KEY_TAB;
+        case VK_RETURN:  return KEY_ENTER;
+        case VK_LEFT:    return KEY_LEFT;
+        case VK_RIGHT:   return KEY_RIGHT;
+        case VK_UP:      return KEY_UP;
+        case VK_DOWN:    return KEY_DOWN;
         default:         return uint32_t(vk) & 0xFF;
     }
 }
@@ -64,6 +66,7 @@ class PlatformWin32 final : public Platform {
 public:
     bool init(const char* title, int w, int h) override {
         width_ = w; height_ = h;
+        mouseX_ = w / 2; mouseY_ = h / 2;
         hInstance_ = GetModuleHandleA(nullptr);
         hGL_ = LoadLibraryA("opengl32.dll");
         if (!hGL_) { fprintf(stderr, "[aw] opengl32.dll not found\n"); return false; }
@@ -147,6 +150,7 @@ public:
             mousePressed_[i] = mouseReleased_[i] = false;
         }
         in.width = width_; in.height = height_;
+        in.mouseX = float(mouseX_); in.mouseY = float(mouseY_);
         in.shouldQuit = shouldQuit_;
 
         MSG msg;
@@ -155,12 +159,8 @@ public:
             DispatchMessageA(&msg);
         }
 
-        if (in.keys[KEY_ESC]) {
-            setCursorCaptured(false);
-            in.keys[KEY_ESC] = 0;
-            in.shouldQuit = true;
-            shouldQuit_ = true;
-        }
+        // Note: Escape is a normal key now (the game toggles the settings menu
+        // on it); only the window-close button sets shouldQuit.
         return !in.shouldQuit;
     }
 
@@ -198,6 +198,17 @@ public:
             ShowCursor(TRUE);
             ReleaseCapture();
         }
+    }
+
+    void resize(int w, int h) override {
+        if (w <= 0 || h <= 0) return;
+        width_ = w; height_ = h;
+        mouseX_ = w / 2; mouseY_ = h / 2;
+        if (!hwnd_) return;
+        RECT r{0, 0, w, h};
+        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
+                     SWP_NOMOVE | SWP_NOZORDER);
     }
 
     void* loadGLProc(const char* name) override {
@@ -238,13 +249,15 @@ private:
         switch (msg) {
             case WM_KEYDOWN: { uint32_t k = vkToKey(wp); if (k < 512) keys_[k] = 1; return 0; }
             case WM_KEYUP:   { uint32_t k = vkToKey(wp); if (k < 512) keys_[k] = 0; return 0; }
-            case WM_LBUTTONDOWN: mousePressed_[MBTN_LEFT] = true;   return 0;
-            case WM_LBUTTONUP:   mouseReleased_[MBTN_LEFT] = true;  return 0;
-            case WM_RBUTTONDOWN: mousePressed_[MBTN_RIGHT] = true;  return 0;
-            case WM_RBUTTONUP:   mouseReleased_[MBTN_RIGHT] = true; return 0;
-            case WM_MBUTTONDOWN: mousePressed_[MBTN_MIDDLE] = true; return 0;
-            case WM_MBUTTONUP:   mouseReleased_[MBTN_MIDDLE] = true; return 0;
+            case WM_LBUTTONDOWN: mouseX_ = GET_X_LPARAM(lp); mouseY_ = GET_Y_LPARAM(lp); mousePressed_[MBTN_LEFT] = true;   return 0;
+            case WM_LBUTTONUP:   mouseX_ = GET_X_LPARAM(lp); mouseY_ = GET_Y_LPARAM(lp); mouseReleased_[MBTN_LEFT] = true;  return 0;
+            case WM_RBUTTONDOWN: mouseX_ = GET_X_LPARAM(lp); mouseY_ = GET_Y_LPARAM(lp); mousePressed_[MBTN_RIGHT] = true;  return 0;
+            case WM_RBUTTONUP:   mouseX_ = GET_X_LPARAM(lp); mouseY_ = GET_Y_LPARAM(lp); mouseReleased_[MBTN_RIGHT] = true; return 0;
+            case WM_MBUTTONDOWN: mouseX_ = GET_X_LPARAM(lp); mouseY_ = GET_Y_LPARAM(lp); mousePressed_[MBTN_MIDDLE] = true; return 0;
+            case WM_MBUTTONUP:   mouseX_ = GET_X_LPARAM(lp); mouseY_ = GET_Y_LPARAM(lp); mouseReleased_[MBTN_MIDDLE] = true; return 0;
             case WM_MOUSEMOVE: {
+                mouseX_ = GET_X_LPARAM(lp);
+                mouseY_ = GET_Y_LPARAM(lp);
                 if (captured_) {
                     mouseDX_ += float(GET_X_LPARAM(lp) - centerX_);
                     mouseDY_ += float(GET_Y_LPARAM(lp) - centerY_);
@@ -275,6 +288,7 @@ private:
     bool mousePressed_[8]{}, mouseReleased_[8]{};
     float mouseDX_ = 0.0f, mouseDY_ = 0.0f;
     int width_ = 0, height_ = 0;
+    int mouseX_ = 0, mouseY_ = 0;
     int centerX_ = 0, centerY_ = 0, screenCX_ = 0, screenCY_ = 0;
     bool captured_ = false, shouldQuit_ = false;
 };

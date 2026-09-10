@@ -9,9 +9,11 @@
 #include "src/core/input.hpp"
 #include "src/core/platform.hpp"
 #include "src/game/constants.hpp"
+#include "src/game/game.hpp"
 #include "src/game/grid.hpp"
 #include "src/game/interaction.hpp"
 #include "src/game/player.hpp"
+#include "src/game/settings.hpp"
 #include "src/game/wall.hpp"
 
 using namespace aw;
@@ -329,6 +331,142 @@ static void testInteraction() {
 }
 
 // ---------------------------------------------------------------------------
+static void testSettings() {
+    Settings s;
+    CHECK_NEAR(s.volume, 0.8, 1e-6);
+    CHECK_NEAR(s.sensitivity, 1.0, 1e-6);
+    // clamping
+    s.volume = 2.0f; s.sensitivity = -1.0f; s.width = 10; s.height = 99999;
+    s.clamp();
+    CHECK_NEAR(s.volume, 1.0, 1e-6);
+    CHECK_NEAR(s.sensitivity, 0.1, 1e-6);
+    CHECK(s.width == 320);
+    CHECK(s.height == 4320);
+    // serialize/parse roundtrip
+    Settings a;
+    a.volume = 0.35f; a.sensitivity = 2.5f; a.width = 1920; a.height = 1080;
+    char buf[256];
+    a.serialize(buf, sizeof(buf));
+    Settings b;
+    CHECK(b.parse(buf));
+    CHECK_NEAR(b.volume, 0.35, 1e-3);
+    CHECK_NEAR(b.sensitivity, 2.5, 1e-3);
+    CHECK(b.width == 1920 && b.height == 1080);
+    // unknown keys ignored, missing keys keep their values
+    Settings c;
+    CHECK(c.parse("bogus=123\nvolume=0.5\n"));
+    CHECK_NEAR(c.volume, 0.5, 1e-6);
+    CHECK_NEAR(c.sensitivity, 1.0, 1e-6);
+    // resolution modes
+    CHECK(a.modeIndex() == 2);
+    a.setMode(0);
+    CHECK(a.width == 1280 && a.height == 720);
+    a.cycleMode(1);
+    CHECK(a.width == 1600 && a.height == 900);
+    a.cycleMode(-1);
+    CHECK(a.width == 1280 && a.height == 720);
+}
+
+// ---------------------------------------------------------------------------
+static void testSensitivity() {
+    Player p;
+    p.sensitivity = 1.0f;
+    p.look(100.0f, 0.0f);
+    CHECK_NEAR(p.yaw, -100.0f * MOUSE_SENS, 1e-6);
+    p.yaw = 0.0f;
+    p.sensitivity = 2.0f;
+    p.look(100.0f, 0.0f);
+    CHECK_NEAR(p.yaw, -100.0f * MOUSE_SENS * 2.0f, 1e-6);
+}
+
+// ---------------------------------------------------------------------------
+static void testMenuNav() {
+    // Keyboard-only menu logic (no GL needed): selection, adjust, actions.
+    Platform* plat = createHeadlessPlatform();
+    plat->init("t", 1280, 720);
+    Audio audio;
+    audio.init(false);  // silent dummy
+    Settings s;
+    Menu m;
+    m.open();
+
+    auto frame = [&](uint32_t key) {
+        FrameInput in = zeroInput();
+        if (key) in.keys[key] = 1;
+        m.update(in, s, audio, *plat);
+    };
+    // Down x3 -> Restart; Enter -> restart flag.
+    frame(KEY_DOWN); frame(0);
+    frame(KEY_DOWN); frame(0);
+    frame(KEY_DOWN); frame(0);
+    CHECK(m.selected() == Menu::Restart);
+    frame(KEY_ENTER); frame(0);
+    CHECK(m.consumeRestart());
+    CHECK(!m.consumeRestart());
+    // Up wraps to the top (volume); Right raises the volume bar.
+    for (int i = 0; i < 3; ++i) { frame(KEY_UP); frame(0); }
+    CHECK(m.selected() == Menu::Volume);
+    float v0 = s.volume;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.volume > v0);
+    frame(KEY_LEFT); frame(0);
+    CHECK_NEAR(s.volume, v0, 1e-6);
+    // Resolution cycles + resizes the backend.
+    frame(KEY_DOWN); frame(0);
+    CHECK(m.selected() == Menu::Resolution);
+    int w0 = s.width;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.width != w0);
+    FrameInput probe = zeroInput();
+    plat->frame(probe);
+    CHECK(probe.width == s.width && probe.height == s.height);
+    // Quit via keyboard.
+    frame(KEY_DOWN); frame(0);  // sensitivity
+    frame(KEY_DOWN); frame(0);  // restart
+    frame(KEY_DOWN); frame(0);  // resume
+    frame(KEY_DOWN); frame(0);  // quit
+    CHECK(m.selected() == Menu::Quit);
+    frame(KEY_ENTER); frame(0);
+    CHECK(m.consumeQuit());
+
+    audio.shutdown();
+    plat->shutdown();
+    delete plat;
+}
+
+// ---------------------------------------------------------------------------
+static void testRestart() {
+    // init()/shutdown() may read/write settings.cfg — only remove it if we made it.
+    FILE* pre = std::fopen("settings.cfg", "rb");
+    bool hadSettings = (pre != nullptr);
+    if (pre) std::fclose(pre);
+
+    Game g;
+    CHECK(g.init("t", 1280, 720, true));
+    // Dirty the world, then restart.
+    g.wall().setBrick(60, 60, STATE_EXTENDED, PULL_DEPTH);
+    CHECK(g.wall().store().activeCount() == 14);  // 13 seeded + 1
+    g.player().pos = {100.0f, 200.0f, 30.0f};
+    g.restart();
+    // Modifications cleared, only the 13 seeded bricks remain.
+    CHECK(g.wall().store().activeCount() == 13);
+    CHECK_NEAR(g.wall().brickDepth(60, 60), 0.0f, 1e-6);
+    CHECK(g.wall().residentCount() == 81);
+    // Player respawned on the platform.
+    float top = -1e30f;
+    for (int32_t bx = 44; bx <= 51; ++bx) {
+        float t = float(-1) + brickSize(bx, -1);
+        if (t > top) top = t;
+    }
+    CHECK_NEAR(g.player().pos.x, 48.0f, 1e-6);
+    CHECK_NEAR(g.player().pos.y, top + 0.1f, 1e-6);
+    CHECK_NEAR(g.player().pos.z, 0.5f, 1e-6);
+    g.shutdown();
+
+    if (!hadSettings) std::remove("settings.cfg");
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     testGrid();
     testBrickSizes();
@@ -338,6 +476,10 @@ int main() {
     testPlayerPhysics();
     testFallForever();
     testInteraction();
+    testSettings();
+    testSensitivity();
+    testMenuNav();
+    testRestart();
 
     fprintf(stderr, "\n[aw-tests] %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "../core/math.hpp"
+#include "../audio/audio.hpp"
 #include "constants.hpp"
 #include "grid.hpp"
 #include "player.hpp"
@@ -158,6 +159,14 @@ public:
         return n;
     }
 
+    // Cancel every in-flight lerp (restart).
+    void clear() {
+        for (int i = 0; i < MAX_LERPS; ++i) lerps_[i].active = false;
+    }
+
+    // Optional sound effects (null = silent, e.g. tests/headless dummy).
+    void setAudio(Audio* audio) { audio_ = audio; }
+
     // Pull (extend) the target brick: starts a 3 s lerp outward. Clicking a
     // brick that is already lerping retargets it smoothly from its current
     // depth (so a mid-retract click reverses back out). Returns true if a lerp
@@ -173,6 +182,7 @@ public:
         }
         startLerp(t.bx, t.by, d, PULL_DEPTH);
         wall.setBrick(t.bx, t.by, STATE_EXTENDING, d);
+        if (audio_) audio_->play(Sfx::Pull);
         return true;
     }
 
@@ -185,6 +195,7 @@ public:
         if (d <= 1e-4f && !isLerping(t.bx, t.by)) return false;
         startLerp(t.bx, t.by, d, 0.0f);
         wall.setBrick(t.bx, t.by, STATE_RETRACTING, d);
+        if (audio_) audio_->play(Sfx::Push);
         return true;
     }
 
@@ -204,6 +215,7 @@ public:
                 L.active = false;
                 BrickState s = L.to <= 1e-4f ? STATE_REST : STATE_EXTENDED;
                 wall.setBrick(L.bx, L.by, s, L.to);
+                if (audio_) audio_->play(Sfx::Done);
             } else {
                 BrickState s = (L.to > L.from) ? STATE_EXTENDING : STATE_RETRACTING;
                 wall.setBrick(L.bx, L.by, s, nd);
@@ -236,6 +248,7 @@ private:
     }
 
     BrickLerp lerps_[MAX_LERPS]{};
+    Audio* audio_ = nullptr;
 };
 
 }  // namespace aw

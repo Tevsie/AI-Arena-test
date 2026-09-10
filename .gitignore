@@ -3,3 +3,4 @@ build/
 *.obj
 .cache/
 winbuild.log
+settings.cfg

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "font.hpp"
 #include "gl.h"
 
 namespace aw {
@@ -102,6 +103,55 @@ void main() {
     if (!hz && !vt) discard;
     vec3 col = uHot > 0.5 ? vec3(0.35, 1.0, 0.45) : vec3(1.0);
     fragColor = vec4(col, 0.95);
+}
+)GLSL";
+
+// UI rect: unit quad (0..1) mapped to a pixel rect (top-left origin).
+const char* kUiRectVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec2 aPos;
+uniform vec2 uRes;   // framebuffer size (pixels)
+uniform vec4 uDst;   // x, y, w, h (pixels, top-left origin)
+void main() {
+    vec2 px = uDst.xy + aPos * uDst.zw;
+    vec2 ndc = vec2(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+)GLSL";
+
+const char* kUiRectFS = R"GLSL(
+#version 330 core
+uniform vec4 uColor;
+out vec4 fragColor;
+void main() { fragColor = uColor; }
+)GLSL";
+
+// UI text: unit quad mapped to a glyph rect, sampling the font atlas.
+const char* kUiTextVS = R"GLSL(
+#version 330 core
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec2 aUV;
+uniform vec2 uRes;
+uniform vec4 uDst;   // x, y, w, h (pixels, top-left origin)
+out vec2 vUV;
+void main() {
+    vec2 px = uDst.xy + aPos * uDst.zw;
+    vec2 ndc = vec2(px.x / uRes.x * 2.0 - 1.0, 1.0 - px.y / uRes.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+    vUV = aUV;
+}
+)GLSL";
+
+const char* kUiTextFS = R"GLSL(
+#version 330 core
+in vec2 vUV;
+uniform sampler2D uTex;
+uniform vec4 uColor;
+out vec4 fragColor;
+void main() {
+    float a = texture(uTex, vUV).a;
+    if (a < 0.01) discard;
+    fragColor = vec4(uColor.rgb, uColor.a * a);
 }
 )GLSL";
 
@@ -225,6 +275,51 @@ bool Renderer::init() {
     gl.EnableVertexAttribArray(0);
     gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
 
+    // ---- UI overlay (settings menu): rect + text programs, dynamic quads ---
+    uiRectProg_ = link(kUiRectVS, kUiRectFS);
+    uiTextProg_ = link(kUiTextVS, kUiTextFS);
+    if (!uiRectProg_ || !uiTextProg_) return false;
+    uiRectRes_ = gl.GetUniformLocation(uiRectProg_, "uRes");
+    uiRectDst_ = gl.GetUniformLocation(uiRectProg_, "uDst");
+    uiRectCol_ = gl.GetUniformLocation(uiRectProg_, "uColor");
+    uiTextRes_ = gl.GetUniformLocation(uiTextProg_, "uRes");
+    uiTextDst_ = gl.GetUniformLocation(uiTextProg_, "uDst");
+    uiTextCol_ = gl.GetUniformLocation(uiTextProg_, "uColor");
+    uiTextTex_ = gl.GetUniformLocation(uiTextProg_, "uTex");
+
+    // Unit quad, triangle strip: (0,0) (1,0) (0,1) (1,1).
+    float rquad[8] = {0, 0, 1, 0, 0, 1, 1, 1};
+    gl.GenVertexArrays(1, &uiRectVAO_);
+    gl.BindVertexArray(uiRectVAO_);
+    gl.GenBuffers(1, &uiRectVBO_);
+    gl.BindBuffer(GL_ARRAY_BUFFER, uiRectVBO_);
+    gl.BufferData(GL_ARRAY_BUFFER, sizeof(rquad), rquad, GL_STATIC_DRAW);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void*)0);
+
+    float tquad[16] = {0, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1};
+    gl.GenVertexArrays(1, &uiTextVAO_);
+    gl.BindVertexArray(uiTextVAO_);
+    gl.GenBuffers(1, &uiTextVBO_);
+    gl.BindBuffer(GL_ARRAY_BUFFER, uiTextVBO_);
+    gl.BufferData(GL_ARRAY_BUFFER, sizeof(tquad), nullptr, GL_DYNAMIC_DRAW);
+    gl.EnableVertexAttribArray(0);
+    gl.VertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+    gl.EnableVertexAttribArray(1);
+    gl.VertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float),
+                           (void*)(2 * sizeof(float)));
+
+    const FontAtlas& atlas = fontAtlas();
+    gl.GenTextures(1, &fontTex_);
+    gl.ActiveTexture(GL_TEXTURE0);
+    gl.BindTexture(GL_TEXTURE_2D, fontTex_);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, FontAtlas::kW, FontAtlas::kH, 0,
+                  GL_RGBA, GL_UNSIGNED_BYTE, atlas.px);
+
     gl.BindVertexArray(0);
     ready_ = true;
     return true;
@@ -235,13 +330,21 @@ void Renderer::shutdown() {
     if (brickProg_) gl.DeleteProgram(brickProg_);
     if (skyProg_) gl.DeleteProgram(skyProg_);
     if (crosshairProg_) gl.DeleteProgram(crosshairProg_);
+    if (uiRectProg_) gl.DeleteProgram(uiRectProg_);
+    if (uiTextProg_) gl.DeleteProgram(uiTextProg_);
     if (cubeVBO_) gl.DeleteBuffers(1, &cubeVBO_);
     if (instVBO_) gl.DeleteBuffers(1, &instVBO_);
     if (fullVBO_) gl.DeleteBuffers(1, &fullVBO_);
+    if (uiRectVBO_) gl.DeleteBuffers(1, &uiRectVBO_);
+    if (uiTextVBO_) gl.DeleteBuffers(1, &uiTextVBO_);
     if (cubeVAO_) gl.DeleteVertexArrays(1, &cubeVAO_);
     if (fullVAO_) gl.DeleteVertexArrays(1, &fullVAO_);
-    brickProg_ = skyProg_ = crosshairProg_ = 0;
-    cubeVBO_ = instVBO_ = fullVBO_ = cubeVAO_ = fullVAO_ = 0;
+    if (uiRectVAO_) gl.DeleteVertexArrays(1, &uiRectVAO_);
+    if (uiTextVAO_) gl.DeleteVertexArrays(1, &uiTextVAO_);
+    if (fontTex_) gl.DeleteTextures(1, &fontTex_);
+    brickProg_ = skyProg_ = crosshairProg_ = uiRectProg_ = uiTextProg_ = 0;
+    cubeVBO_ = instVBO_ = fullVBO_ = uiRectVBO_ = uiTextVBO_ = 0;
+    cubeVAO_ = fullVAO_ = uiRectVAO_ = uiTextVAO_ = fontTex_ = 0;
     ready_ = false;
 }
 
@@ -357,6 +460,67 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
 
     gl.BindVertexArray(0);
     return visible * CHUNK_BRICKS;
+}
+
+void Renderer::uiBegin(int width, int height) {
+    if (!ready_) return;
+    uiWidth_ = width;
+    uiHeight_ = height;
+    gl.Viewport(0, 0, width, height);
+    gl.Disable(GL_DEPTH_TEST);
+    gl.DepthMask(GL_FALSE);
+    gl.Enable(GL_BLEND);
+    gl.BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
+void Renderer::uiRect(float x, float y, float w, float h,
+                      float r, float g, float b, float a) {
+    if (!ready_ || w <= 0.0f || h <= 0.0f) return;
+    gl.UseProgram(uiRectProg_);
+    gl.Uniform2f(uiRectRes_, float(uiWidth_), float(uiHeight_));
+    gl.Uniform4f(uiRectDst_, x, y, w, h);
+    gl.Uniform4f(uiRectCol_, r, g, b, a);
+    gl.BindVertexArray(uiRectVAO_);
+    gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+}
+
+void Renderer::uiText(float x, float y, int scale,
+                      float r, float g, float b, float a, const char* text) {
+    if (!ready_ || !text || scale < 1) return;
+    gl.UseProgram(uiTextProg_);
+    gl.Uniform2f(uiTextRes_, float(uiWidth_), float(uiHeight_));
+    gl.Uniform4f(uiTextCol_, r, g, b, a);
+    gl.Uniform1i(uiTextTex_, 0);
+    gl.ActiveTexture(GL_TEXTURE0);
+    gl.BindTexture(GL_TEXTURE_2D, fontTex_);
+    gl.BindVertexArray(uiTextVAO_);
+    gl.BindBuffer(GL_ARRAY_BUFFER, uiTextVBO_);
+
+    float cx = x;
+    float gw = 6.0f * float(scale);   // 6px advance
+    float gh = 8.0f * float(scale);
+    for (const char* p = text; *p; ++p, cx += gw) {
+        unsigned char c = (unsigned char)*p;
+        if (c >= 128) continue;
+        // Glyph occupies cell bytes x+1..x+6 (alpha from the baked atlas).
+        float u0 = (float((c % 16) * 8)) / 128.0f;
+        float v1 = 1.0f - (float((c / 16) * 8)) / 64.0f;  // texture row 0 is the top
+        float u1 = u0 + 6.0f / 128.0f;
+        float v0 = v1 - 8.0f / 64.0f;
+        float v[16] = {0, 0, u0, v1, 1, 0, u1, v1, 0, 1, u0, v0, 1, 1, u1, v0};
+        gl.BufferSubData(GL_ARRAY_BUFFER, 0, sizeof(v), v);
+        gl.Uniform4f(uiTextDst_, cx, y, gw, gh);
+        gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    }
+}
+
+void Renderer::uiEnd() {
+    if (!ready_) return;
+    gl.BindVertexArray(0);
+    gl.UseProgram(0);
+    gl.Disable(GL_BLEND);
+    gl.Enable(GL_DEPTH_TEST);
+    gl.DepthMask(GL_TRUE);
 }
 
 }  // namespace aw

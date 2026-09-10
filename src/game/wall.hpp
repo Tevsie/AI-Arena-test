@@ -97,6 +97,17 @@ public:
     int32_t count() const { return count_; }        // distinct bricks ever touched
     int32_t activeCount() const { return active_; } // bricks currently extended
 
+    // Forget every modification (restart). Fixed pool: just clear in place.
+    void reset() {
+        for (int32_t i = 0; i < CAP; ++i) {
+            slots_[i].key = 0;
+            slots_[i].state = uint8_t(STATE_REST);
+            slots_[i].depth = 0.0f;
+        }
+        count_ = 0;
+        active_ = 0;
+    }
+
     // Iterate all occupied slots (used when (re)computing a chunk's active count).
     template <typename F>
     void forEach(F&& f) const {
@@ -197,6 +208,17 @@ public:
     }
 
     int32_t residentCount() const { return MAX_RESIDENT_CHUNKS - freeCount_; }
+
+    // Release every chunk and forget every brick modification (restart).
+    void reset() {
+        for (int32_t i = 0; i < MAP_CAP; ++i) map_[i].state = 0;
+        for (int32_t i = 0; i < MAX_RESIDENT_CHUNKS; ++i) {
+            freeSlots_[i] = MAX_RESIDENT_CHUNKS - 1 - i;
+            pool_[i].slot = i;
+        }
+        freeCount_ = MAX_RESIDENT_CHUNKS;
+        store_.reset();
+    }
 
     // Iterate resident chunks in stable map order (used by the renderer to
     // compact instance ranges into a single contiguous draw).

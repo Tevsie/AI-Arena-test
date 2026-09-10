@@ -31,7 +31,8 @@ code is pushed.
 > `atw.exe` is fully self-contained (x64, no install). It needs a standard
 > Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
 > AMD driver). If SmartScreen warns on first run, click **More info →
-> Run anyway**. Press `Esc` to quit.
+> Run anyway**. Press `Esc` for the settings menu (volume, resolution,
+> sensitivity, restart, quit).
 
 ### Build the .exe yourself on Windows (optional)
 
@@ -88,10 +89,27 @@ back to headless mode and prints a status line.
 | `Space`          | Jump                                    |
 | **Left mouse**   | **Pull** target brick outward (click, 3 s lerp) |
 | **Right mouse**  | **Push** target brick back flush (click, 3 s lerp) |
-| `Esc`            | Quit                                    |
+| `Esc`            | Settings menu (pause)                   |
 
 The center-screen crosshair turns **green** when a brick is in reach. You
 cannot push a brick you are currently standing on.
+
+## Settings (`Esc`)
+
+The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
+
+| Setting              | What it does                                              |
+|----------------------|-----------------------------------------------------------|
+| Master volume bar    | 0–100 % loudness for all procedural sound effects         |
+| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440  |
+| Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
+| **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
+| Resume / Quit        | Close the menu / exit the game                            |
+
+Settings apply instantly and persist to `settings.cfg` next to the executable.
+Sound effects (brick pull/push, jump, land, UI clicks) are synthesized live —
+no audio files needed. Output uses WinMM on Windows and PulseAudio (with an
+ALSA fallback) on Linux; with no audio device the game simply runs silent.
 
 ## How it works (performance architecture)
 
@@ -135,10 +153,13 @@ src/
                  X11+GLX window backend, Win32+WGL window backend,
                  headless backend, input constants
   render/        gl.h/gl.cpp (zero-dependency GL 3.3 loader),
-                 renderer.hpp/.cpp (instanced bricks, sky, crosshair)
+                 renderer.hpp/.cpp (instanced bricks, sky, crosshair, UI overlay),
+                 font.hpp (embedded 5x7 menu font)
   game/          constants, grid/chunk/wall (streaming + brick store),
                  player (kinematic controller), interaction (raycast pull/push),
-                 game.cpp (loop + scripted demo driver)
+                 settings (volume/resolution/sensitivity + persistence),
+                 menu (pause/settings overlay), game.cpp (loop + demo driver)
+  audio/         procedural SFX mixer + synth, WinMM / PulseAudio / ALSA backends
 tests/           dependency-free unit tests (grid, store, streaming,
                  persistence, controller, interaction)
 .github/workflows/  CI: builds + tests on Linux, cross-compiles atw.exe,

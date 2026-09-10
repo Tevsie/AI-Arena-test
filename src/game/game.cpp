@@ -16,6 +16,15 @@ static double nowSeconds() {
 }
 
 bool Game::init(const char* title, int width, int height, bool preferHeadless) {
+    // Saved settings (if any) override the requested window size.
+    if (settings_.load()) {
+        width = settings_.width;
+        height = settings_.height;
+    } else {
+        settings_.width = width;
+        settings_.height = height;
+    }
+
     if (!preferHeadless) {
         platform_ = createPlatform();
         if (platform_->init(title, width, height)) goto platformReady;
@@ -31,20 +40,16 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
     }
 platformReady:;
 
-    // Seed the world: a starting platform the player stands on.
-    float platformTop = 0.0f;
-    for (int32_t bx = 44; bx <= 51; ++bx) {
-        wall_.setBrick(bx, -1, STATE_EXTENDED, 1.0f);
-        float top = float(-1) + brickSize(bx, -1);
-        if (top > platformTop) platformTop = top;
-    }
-    // A short pre-built step path so the scene has visible ledges immediately.
-    for (int32_t i = 0; i < 5; ++i)
-        wall_.setBrick(48 + (i % 3), i, STATE_EXTENDED, 0.85f);
-
+    float platformTop = seedWorld();
     player_.reset(48.0f, platformTop + 0.1f, 0.5f);
+    player_.sensitivity = settings_.sensitivity;
     lastChunk_ = brickToChunk(48, floori(platformTop));
     wall_.streamAround(lastChunk_.cx, lastChunk_.cy);
+
+    audio_.init(!headless());
+    audio_.setVolume(settings_.volume);
+    interaction_.setAudio(&audio_);
+    if (!headless()) fprintf(stderr, "[aw] audio: %s\n", audio_.backendName());
 
     if (!headless()) {
         if (!renderer_.init()) {
@@ -58,7 +63,36 @@ platformReady:;
     return true;
 }
 
+float Game::seedWorld() {
+    // A starting platform the player stands on.
+    float platformTop = 0.0f;
+    for (int32_t bx = 44; bx <= 51; ++bx) {
+        wall_.setBrick(bx, -1, STATE_EXTENDED, 1.0f);
+        float top = float(-1) + brickSize(bx, -1);
+        if (top > platformTop) platformTop = top;
+    }
+    // A short pre-built step path so the scene has visible ledges immediately.
+    for (int32_t i = 0; i < 5; ++i)
+        wall_.setBrick(48 + (i % 3), i, STATE_EXTENDED, 0.85f);
+    return platformTop;
+}
+
+void Game::restart() {
+    wall_.reset();
+    interaction_.clear();
+    float platformTop = seedWorld();
+    player_.reset(48.0f, platformTop + 0.1f, 0.5f);
+    player_.highestBrickY = 0;
+    lastChunk_ = brickToChunk(48, floori(platformTop));
+    wall_.streamAround(lastChunk_.cx, lastChunk_.cy);
+    stats_ = FrameStats{};
+    target_ = TargetResult{};
+    audio_.play(Sfx::Restart);
+}
+
 void Game::shutdown() {
+    settings_.save();
+    audio_.shutdown();
     renderer_.shutdown();
     if (platform_) { platform_->shutdown(); delete platform_; platform_ = nullptr; }
     initialized_ = false;
@@ -67,6 +101,7 @@ void Game::shutdown() {
 // Advance the simulation by dt with the given input, without touching the
 // platform or renderer. Used by tests and by run() (which supplies real input).
 void Game::simulateFrame(const FrameInput& in, float dt) {
+    player_.sensitivity = settings_.sensitivity;
     player_.update(in, wall_, dt);
 
     target_ = interaction_.cast(player_, wall_);
@@ -112,9 +147,44 @@ void Game::run() {
         bool alive = platform_->frame(in);
         if (!alive || in.shouldQuit) break;
 
-        if (headless()) demoDrive(dt);
+        // Esc toggles the settings menu (windowed only); the simulation pauses
+        // while it is open.
+        bool esc = in.keys[KEY_ESC] != 0;
+        if (esc && !prevEsc_ && !headless()) {
+            menuOpen_ = !menuOpen_;
+            if (menuOpen_) menu_.open();
+            else settings_.save();
+            platform_->setCursorCaptured(!menuOpen_);
+        }
+        prevEsc_ = esc;
 
-        simulateFrame(in, dt);
+        if (menuOpen_) {
+            menu_.update(in, settings_, audio_, *platform_);
+            if (menu_.consumeRestart()) {
+                restart();
+                menuOpen_ = false;
+                settings_.save();
+                platform_->setCursorCaptured(true);
+            }
+            if (menu_.consumeResume()) {
+                menuOpen_ = false;
+                settings_.save();
+                platform_->setCursorCaptured(true);
+            }
+            if (menu_.consumeQuit()) {
+                settings_.save();
+                break;
+            }
+        } else {
+            if (headless()) demoDrive(dt);
+
+            bool wasGrounded = player_.grounded;
+            simulateFrame(in, dt);
+            if (!headless()) {
+                if (wasGrounded && in.keys[KEY_SPACE]) audio_.play(Sfx::Jump);
+                if (!wasGrounded && player_.grounded) audio_.play(Sfx::Land);
+            }
+        }
 
         if (!headless()) {
             float aspect = in.width > 0 && in.height > 0 ? float(in.width) / float(in.height)
@@ -125,6 +195,11 @@ void Game::run() {
             Mat4 vp = proj * view;
             stats_.drawnInstances =
                 renderer_.render(wall_, player_, vp, aspect, in.width, in.height, target_.hit);
+            if (menuOpen_) {
+                renderer_.uiBegin(in.width, in.height);
+                menu_.render(renderer_);
+                renderer_.uiEnd();
+            }
             platform_->swapBuffers();
         }
 

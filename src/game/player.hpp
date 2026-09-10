@@ -24,6 +24,7 @@ public:
     bool grounded = false;
     float yaw = 0.0f;               // radians; 0 = looking along +Z (into the wall)
     float pitch = 0.0f;
+    float sensitivity = 1.0f;       // mouse look multiplier (settings)
     int32_t highestBrickY = 0;      // peak reached (for stats)
 
     void reset(float x, float y, float z) {
@@ -46,8 +47,8 @@ public:
     }
 
     void look(float dx, float dy) {
-        yaw -= dx * MOUSE_SENS;
-        pitch -= dy * MOUSE_SENS;
+        yaw -= dx * MOUSE_SENS * sensitivity;
+        pitch -= dy * MOUSE_SENS * sensitivity;
         constexpr float lim = 1.55f;
         if (pitch > lim) pitch = lim;
         if (pitch < -lim) pitch = -lim;
