@@ -16,18 +16,30 @@ static double nowSeconds() {
 }
 
 bool Game::init(const char* title, int width, int height, bool preferHeadless) {
-    // Saved settings (if any) override the requested window size.
+    // Saved settings (if any) override the requested size. `width`/`height`
+    // are the *render* resolution; the window has its own saved size so that
+    // changing resolution never resizes or moves it.
     if (settings_.load()) {
         width = settings_.width;
         height = settings_.height;
     } else {
         settings_.width = width;
         settings_.height = height;
+        settings_.windowW = width;
+        settings_.windowH = height;
+    }
+    settings_.clamp();
+
+    // Windowed-mode window size: fixed (persisted), only fitted to the screen.
+    int winW = settings_.windowW, winH = settings_.windowH;
+    if (winW <= 0 || winH <= 0) {
+        winW = Settings::kWindowDefaultW;
+        winH = Settings::kWindowDefaultH;
     }
 
     if (!preferHeadless) {
         platform_ = createPlatform();
-        if (platform_->init(title, width, height)) goto platformReady;
+        if (platform_->init(title, winW, winH)) goto platformReady;
         // No usable display/GPU: fall back to the headless backend.
         platform_->shutdown();
         delete platform_;
@@ -39,6 +51,17 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
         return false;
     }
 platformReady:;
+    // Keep the windowed window at a size that actually fits the display (the
+    // OS clamps windows that do not, and we want the saved size to be the
+    // real one). The render resolution is untouched by this.
+    {
+        int sw = 0, sh = 0;
+        platform_->screenSize(sw, sh);
+        Settings::fitToScreen(winW, winH, sw, sh, kWindowMarginX, kWindowMarginY);
+        settings_.windowW = winW;
+        settings_.windowH = winH;
+        if (!settings_.fullscreen && !headless()) platform_->resize(winW, winH);
+    }
     if (settings_.fullscreen) platform_->setFullscreen(true);
 
     float platformTop = seedWorld();
@@ -148,6 +171,17 @@ void Game::run() {
         bool alive = platform_->frame(in);
         if (!alive || in.shouldQuit) break;
 
+        // in.width/in.height are the real window client size: the space the
+        // cursor is reported in and the space the UI is drawn in. Remember it
+        // as the windowed window size (never while fullscreen, where it is the
+        // monitor) so it stays consistent across sessions.
+        if (!settings_.fullscreen && !headless() &&
+            in.width >= 320 && in.height >= 200 &&
+            (in.width != settings_.windowW || in.height != settings_.windowH)) {
+            settings_.windowW = in.width;
+            settings_.windowH = in.height;
+        }
+
         // Esc toggles the settings menu (real window only: windowed or
         // fullscreen); the simulation pauses while it is open.
         bool esc = in.keys[KEY_ESC] != 0;
@@ -188,16 +222,25 @@ void Game::run() {
         }
 
         if (!headless()) {
-            float aspect = in.width > 0 && in.height > 0 ? float(in.width) / float(in.height)
-                                                         : 16.0f / 9.0f;
-            Mat4 proj = Mat4::perspective(deg2rad(FOV_DEG), aspect, NEAR_PLANE, FAR_PLANE);
+            // The scene renders at the configured resolution — independent of
+            // the window — and is scaled into it; the projection must match
+            // that resolution's aspect, not the window's.
+            int winW = in.width > 0 ? in.width : settings_.width;
+            int winH = in.height > 0 ? in.height : settings_.height;
+            renderer_.setRenderSize(settings_.width, settings_.height);
+            int rw = winW, rh = winH;
+            renderer_.renderSize(winW, winH, rw, rh);
+            float aspect = rh > 0 ? float(rw) / float(rh) : 16.0f / 9.0f;
+            Mat4 proj = Mat4::perspective(deg2rad(settings_.fov), aspect, NEAR_PLANE, FAR_PLANE);
             Vec3 eye = player_.eye();
             Mat4 view = Mat4::lookAt(eye, eye + player_.forward(), {0, 1, 0});
             Mat4 vp = proj * view;
             stats_.drawnInstances =
-                renderer_.render(wall_, player_, vp, aspect, in.width, in.height, target_.hit);
+                renderer_.render(wall_, player_, vp, settings_.fov, winW, winH, target_.hit);
             if (menuOpen_) {
-                renderer_.uiBegin(in.width, in.height);
+                // Window pixels: the menu is hit-tested against the same
+                // coordinates the platform reports for the cursor.
+                renderer_.uiBegin(winW, winH);
                 menu_.render(renderer_);
                 renderer_.uiEnd();
             }

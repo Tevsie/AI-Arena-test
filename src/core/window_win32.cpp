@@ -132,6 +132,10 @@ public:
 
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);
+        // Windows clamps windows that do not fit the work area; take the real
+        // client area so the UI space matches the drawable from frame one.
+        syncWindowSize();
+        syncPointer();
         fprintf(stderr, "[aw] renderer: %s | %s | GLSL %s\n",
                 gl.GetString ? (const char*)gl.GetString(GL_RENDERER) : "?",
                 gl.GetString ? (const char*)gl.GetString(GL_VERSION) : "?",
@@ -149,8 +153,6 @@ public:
             in.mouseReleased[i] = mouseReleased_[i];
             mousePressed_[i] = mouseReleased_[i] = false;
         }
-        in.width = width_; in.height = height_;
-        in.mouseX = float(mouseX_); in.mouseY = float(mouseY_);
         in.shouldQuit = shouldQuit_;
 
         MSG msg;
@@ -158,6 +160,12 @@ public:
             TranslateMessage(&msg);
             DispatchMessageA(&msg);
         }
+
+        // Report size and cursor after the message pump: a WM_SIZE handled
+        // this frame must not leave the UI laid out in a stale coordinate
+        // space, or clicks land away from the drawn cursor.
+        in.width = width_; in.height = height_;
+        in.mouseX = float(mouseX_); in.mouseY = float(mouseY_);
 
         // Note: Escape is a normal key now (the game toggles the settings menu
         // on it); only the window-close button sets shouldQuit.
@@ -197,18 +205,42 @@ public:
         } else {
             ShowCursor(TRUE);
             ReleaseCapture();
+            // The cursor reappears wherever look-warping left it; adopt the
+            // real position so the menu's first hover is correct.
+            syncPointer();
         }
     }
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
         width_ = w; height_ = h;
-        mouseX_ = w / 2; mouseY_ = h / 2;
         if (!hwnd_) return;
         RECT r{0, 0, w, h};
-        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        // Decorations depend on the *current* style: a borderless fullscreen
+        // window has no frame, and assuming one yields a client area that
+        // differs from the requested size (UI offset from the cursor).
+        AdjustWindowRect(&r, currentStyle(), FALSE);
         SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
                      SWP_NOMOVE | SWP_NOZORDER);
+        syncWindowSize();
+        syncPointer();
+    }
+
+    void screenSize(int& w, int& h) const override {
+        w = h = 0;
+        // Work area of the monitor holding the window: what the window may
+        // actually occupy without hiding under the taskbar.
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        HMONITOR mon = hwnd_ ? MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY)
+                             : MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        if (GetMonitorInfoA(mon, &mi)) {
+            w = mi.rcWork.right - mi.rcWork.left;
+            h = mi.rcWork.bottom - mi.rcWork.top;
+        } else {
+            w = GetSystemMetrics(SM_CXSCREEN);
+            h = GetSystemMetrics(SM_CYSCREEN);
+        }
     }
 
     void setFullscreen(bool on) override {
@@ -229,6 +261,8 @@ public:
                              mi.rcMonitor.bottom - mi.rcMonitor.top,
                              SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
             }
+            syncWindowSize();
+            syncPointer();
         } else {
             SetWindowLongA(hwnd_, GWL_STYLE, savedStyle_);
             SetWindowPos(hwnd_, nullptr, savedRect_.left, savedRect_.top,
@@ -236,6 +270,8 @@ public:
                          savedRect_.bottom - savedRect_.top,
                          SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
             ShowWindow(hwnd_, SW_RESTORE);
+            syncWindowSize();
+            syncPointer();
         }
     }
 
@@ -246,6 +282,40 @@ public:
     }
 
 private:
+    LONG currentStyle() const {
+        return hwnd_ ? GetWindowLongA(hwnd_, GWL_STYLE) : static_cast<LONG>(WS_OVERLAPPEDWINDOW);
+    }
+
+    // Adopt the client area the window really has (Windows clamps windows to
+    // the work area / monitor), so the reported size never lies.
+    void syncWindowSize() {
+        if (!hwnd_) return;
+        RECT cr{};
+        if (!GetClientRect(hwnd_, &cr)) return;
+        int w = cr.right - cr.left, h = cr.bottom - cr.top;
+        if (w > 0 && h > 0) {
+            width_ = w;
+            height_ = h;
+            if (captured_) {
+                centerX_ = w / 2; centerY_ = h / 2;
+                POINT pt{centerX_, centerY_};
+                ClientToScreen(hwnd_, &pt);
+                screenCX_ = pt.x; screenCY_ = pt.y;
+            }
+        }
+    }
+
+    // Ask Windows where the pointer is instead of assuming it: a resize does
+    // not move the cursor, and a stale stored position mis-hits the menu.
+    void syncPointer() {
+        if (!hwnd_) return;
+        POINT pt{};
+        if (!GetCursorPos(&pt)) return;
+        if (!ScreenToClient(hwnd_, &pt)) return;
+        mouseX_ = pt.x;
+        mouseY_ = pt.y;
+    }
+
     bool setupPixelFormat() {
         PIXELFORMATDESCRIPTOR pfd{};
         pfd.nSize = sizeof(pfd);
@@ -294,8 +364,10 @@ private:
                 return 0;
             }
             case WM_SIZE:
-                width_ = LOWORD(lp);
-                height_ = HIWORD(lp);
+                // Read the client area back rather than trusting lParam: a
+                // minimized (0x0) or clamped window must not poison the size
+                // the UI is laid out in.
+                if (wp != SIZE_MINIMIZED) syncWindowSize();
                 return 0;
             case WM_CLOSE:
                 shouldQuit_ = true;

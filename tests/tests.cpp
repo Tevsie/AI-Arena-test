@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <type_traits>
 
 #include "src/core/input.hpp"
 #include "src/core/platform.hpp"
@@ -15,6 +16,8 @@
 #include "src/game/player.hpp"
 #include "src/game/settings.hpp"
 #include "src/game/wall.hpp"
+#include "src/render/gl.h"
+#include "src/render/renderer.hpp"
 
 using namespace aw;
 
@@ -457,6 +460,53 @@ static void testSettings() {
     CHECK(a.width == 1600 && a.height == 900);
     a.cycleMode(-1);
     CHECK(a.width == 1280 && a.height == 720);
+    // FOV: default, clamp and serialize/parse round-trip
+    CHECK_NEAR(Settings().fov, Settings::kFovDefault, 1e-6);
+    CHECK_NEAR(Settings::kFovDefault, FOV_DEG, 1e-6);
+    Settings d;
+    d.fov = 103.0f; d.width = 1920; d.height = 1080; d.windowW = 1600; d.windowH = 900;
+    d.fullscreen = true;
+    char dbuf[256];
+    d.serialize(dbuf, sizeof(dbuf));
+    Settings e;
+    CHECK(e.parse(dbuf));
+    CHECK_NEAR(e.fov, 103.0, 1e-3);
+    CHECK(e.width == 1920 && e.height == 1080);
+    CHECK(e.windowW == 1600 && e.windowH == 900);
+    CHECK(e.fullscreen);
+    Settings f;
+    f.fov = 500.0f; f.clamp();
+    CHECK_NEAR(f.fov, Settings::kFovMax, 1e-6);
+    f.fov = -500.0f; f.clamp();
+    CHECK_NEAR(f.fov, Settings::kFovMin, 1e-6);
+    // An older settings.cfg (no fov / window keys) keeps today's defaults.
+    Settings old;
+    CHECK(old.parse("volume=0.4\nwidth=800\nheight=600\nfullscreen=1\n"));
+    CHECK_NEAR(old.fov, Settings::kFovDefault, 1e-6);
+    CHECK(old.windowW == Settings::kWindowDefaultW && old.windowH == Settings::kWindowDefaultH);
+    CHECK(old.width == 800 && old.height == 600);
+    CHECK(old.fullscreen);
+}
+
+// ---------------------------------------------------------------------------
+static void testWindowFit() {
+    int w = 1280, h = 720;
+    Settings::fitToScreen(w, h, 1920, 1080, 64, 96);     // plenty of room
+    CHECK(w == 1280 && h == 720);
+    Settings::fitToScreen(w, h, 0, 0, 64, 96);           // unknown screen: no-op
+    CHECK(w == 1280 && h == 720);
+    w = 1280; h = 720;
+    Settings::fitToScreen(w, h, 1366, 768, 64, 96);      // too tall: scale down
+    CHECK(w == 1194 && h == 672);
+    CHECK_NEAR(float(w) / float(h), 1280.0f / 720.0f, 0.01);   // aspect kept
+    w = 2560; h = 1440;
+    Settings::fitToScreen(w, h, 1920, 1080, 64, 96);
+    CHECK(w <= 1920 - 64 && h <= 1080 - 96);
+    CHECK_NEAR(float(w) / float(h), 2560.0f / 1440.0f, 0.01);
+    // Ridiculously small screens still yield a usable window.
+    w = 1280; h = 720;
+    Settings::fitToScreen(w, h, 200, 150, 0, 0);
+    CHECK(w >= 320 && h >= 200);
 }
 
 // ---------------------------------------------------------------------------
@@ -487,21 +537,23 @@ static void testMenuNav() {
         if (key) in.keys[key] = 1;
         m.update(in, s, audio, *plat);
     };
-    // Down x4 -> Restart; Enter -> restart flag.
-    for (int i = 0; i < 4; ++i) { frame(KEY_DOWN); frame(0); }
+    // Down x5 -> Restart; Enter -> restart flag.
+    for (int i = 0; i < 5; ++i) { frame(KEY_DOWN); frame(0); }
     CHECK(m.selected() == Menu::Restart);
     frame(KEY_ENTER); frame(0);
     CHECK(m.consumeRestart());
     CHECK(!m.consumeRestart());
     // Up wraps to the top (volume); Right raises the volume bar.
-    for (int i = 0; i < 4; ++i) { frame(KEY_UP); frame(0); }
+    for (int i = 0; i < 5; ++i) { frame(KEY_UP); frame(0); }
     CHECK(m.selected() == Menu::Volume);
     float v0 = s.volume;
     frame(KEY_RIGHT); frame(0);
     CHECK(s.volume > v0);
     frame(KEY_LEFT); frame(0);
     CHECK_NEAR(s.volume, v0, 1e-6);
-    // Resolution cycles + resizes the backend.
+    // Resolution cycles the *render* resolution and leaves the window alone:
+    // a window that changes size is what used to desync the cursor from the
+    // UI hit boxes.
     frame(KEY_DOWN); frame(0);
     CHECK(m.selected() == Menu::Resolution);
     int w0 = s.width;
@@ -509,9 +561,31 @@ static void testMenuNav() {
     CHECK(s.width != w0);
     FrameInput probe = zeroInput();
     plat->frame(probe);
-    CHECK(probe.width == s.width && probe.height == s.height);
+    CHECK(probe.width == 1280 && probe.height == 720);        // window untouched
+    CHECK(probe.width != s.width || probe.height != s.height);
+    // Sensitivity.
+    frame(KEY_DOWN); frame(0);
+    CHECK(m.selected() == Menu::Sensitivity);
+    float sens0 = s.sensitivity;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.sensitivity > sens0);
+    frame(KEY_LEFT); frame(0);
+    CHECK_NEAR(s.sensitivity, sens0, 1e-6);
+    // FOV: arrows move it and it stays inside its clamp.
+    frame(KEY_DOWN); frame(0);
+    CHECK(m.selected() == Menu::Fov);
+    float fov0 = s.fov;
+    CHECK_NEAR(fov0, Settings::kFovDefault, 1e-6);
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.fov > fov0);
+    frame(KEY_LEFT); frame(0);
+    CHECK_NEAR(s.fov, fov0, 1e-6);
+    s.fov = 500.0f; s.clamp();
+    CHECK_NEAR(s.fov, Settings::kFovMax, 1e-6);
+    s.fov = -500.0f; s.clamp();
+    CHECK_NEAR(s.fov, Settings::kFovMin, 1e-6);
+    s.fov = fov0;
     // Fullscreen toggles via Enter and arrows (headless backend ignores it).
-    frame(KEY_DOWN); frame(0);  // sensitivity
     frame(KEY_DOWN); frame(0);  // fullscreen
     CHECK(m.selected() == Menu::Fullscreen);
     CHECK(!s.fullscreen);
@@ -532,6 +606,193 @@ static void testMenuNav() {
     audio.shutdown();
     plat->shutdown();
     delete plat;
+}
+
+// ---------------------------------------------------------------------------
+// Recording GL stub: the renderer is CPU state plus GL calls, so filling the
+// function table with recorders lets the tests verify the render path with no
+// GPU — which resolution the scene is drawn at, how it is presented into the
+// window, and that the UI overlay ends up in the window's own pixel space
+// (the same space the cursor is reported in, i.e. where clicks land).
+static struct {
+    int viewports = 0;
+    int vpW[8]{}, vpH[8]{};
+    unsigned boundFb = 0;
+    int blits = 0;
+    int blitSrc[4]{}, blitDst[4]{};
+    unsigned blitFilter = 0;
+    int texW = 0, texH = 0, rbW = 0, rbH = 0;
+    bool fbComplete = true;
+    int u2n = 0;
+    float u2[16][2]{};
+    unsigned nextId = 1;
+    void reset() {
+        static const std::remove_reference_t<decltype(*this)> fresh{};
+        *this = fresh;
+    }
+} g_gl;
+
+static void installGlSpy() {
+    g_gl.reset();
+    gl = GL{};
+    gl.ready = true;
+    auto gen = [](GLsizei n, GLuint* p) { for (GLsizei i = 0; i < n; ++i) p[i] = g_gl.nextId++; };
+    gl.GenBuffers = gen;
+    gl.GenVertexArrays = gen;
+    gl.GenTextures = gen;
+    gl.GenFramebuffers = gen;
+    gl.GenRenderbuffers = gen;
+    gl.DeleteBuffers = [](GLsizei, const GLuint*) {};
+    gl.DeleteVertexArrays = [](GLsizei, const GLuint*) {};
+    gl.DeleteTextures = [](GLsizei, const GLuint*) {};
+    gl.DeleteFramebuffers = [](GLsizei, const GLuint*) {};
+    gl.DeleteRenderbuffers = [](GLsizei, const GLuint*) {};
+    gl.BindBuffer = [](GLenum, GLuint) {};
+    gl.BindVertexArray = [](GLuint) {};
+    gl.BindTexture = [](GLenum, GLuint) {};
+    gl.BindRenderbuffer = [](GLenum, GLuint) {};
+    gl.BindFramebuffer = [](GLenum, GLuint fb) { g_gl.boundFb = fb; };
+    gl.BufferData = [](GLenum, GLsizeiptr, const void*, GLenum) {};
+    gl.BufferSubData = [](GLenum, GLintptr, GLsizeiptr, const void*) {};
+    gl.Enable = [](GLenum) {};
+    gl.Disable = [](GLenum) {};
+    gl.DepthFunc = [](GLenum) {};
+    gl.DepthMask = [](GLboolean) {};
+    gl.BlendFunc = [](GLenum, GLenum) {};
+    gl.ClearColor = [](GLfloat, GLfloat, GLfloat, GLfloat) {};
+    gl.Clear = [](GLbitfield) {};
+    gl.Viewport = [](GLint, GLint, GLsizei w, GLsizei h) {
+        if (g_gl.viewports < 8) { g_gl.vpW[g_gl.viewports] = w; g_gl.vpH[g_gl.viewports] = h; }
+        ++g_gl.viewports;
+    };
+    gl.TexImage2D = [](GLenum, GLint, GLint, GLsizei w, GLsizei h, GLint, GLenum, GLenum,
+                       const void*) { g_gl.texW = w; g_gl.texH = h; };
+    gl.TexParameteri = [](GLenum, GLenum, GLint) {};
+    gl.ActiveTexture = [](GLenum) {};
+    gl.FramebufferTexture2D = [](GLenum, GLenum, GLenum, GLuint, GLint) {};
+    gl.RenderbufferStorage = [](GLenum, GLenum, GLsizei w, GLsizei h) { g_gl.rbW = w; g_gl.rbH = h; };
+    gl.FramebufferRenderbuffer = [](GLenum, GLenum, GLenum, GLuint) {};
+    gl.CheckFramebufferStatus = [](GLenum) -> GLenum {
+        return g_gl.fbComplete ? GLenum(GL_FRAMEBUFFER_COMPLETE) : GLenum(0);
+    };
+    gl.BlitFramebuffer = [](GLint sx0, GLint sy0, GLint sx1, GLint sy1, GLint dx0, GLint dy0,
+                            GLint dx1, GLint dy1, GLbitfield, GLenum filter) {
+        g_gl.blitSrc[0] = sx0; g_gl.blitSrc[1] = sy0; g_gl.blitSrc[2] = sx1; g_gl.blitSrc[3] = sy1;
+        g_gl.blitDst[0] = dx0; g_gl.blitDst[1] = dy0; g_gl.blitDst[2] = dx1; g_gl.blitDst[3] = dy1;
+        g_gl.blitFilter = filter;
+        ++g_gl.blits;
+    };
+    gl.CreateShader = [](GLenum) -> GLuint { return 1; };
+    gl.ShaderSource = [](GLuint, GLsizei, const GLchar* const*, const GLint*) {};
+    gl.CompileShader = [](GLuint) {};
+    gl.GetShaderiv = [](GLuint, GLenum, GLint* v) { *v = 1; };
+    gl.GetShaderInfoLog = [](GLuint, GLsizei, GLsizei*, GLchar*) {};
+    gl.DeleteShader = [](GLuint) {};
+    gl.CreateProgram = []() -> GLuint { return 2; };
+    gl.AttachShader = [](GLuint, GLuint) {};
+    gl.LinkProgram = [](GLuint) {};
+    gl.GetProgramiv = [](GLuint, GLenum, GLint* v) { *v = 1; };
+    gl.GetProgramInfoLog = [](GLuint, GLsizei, GLsizei*, GLchar*) {};
+    gl.DeleteProgram = [](GLuint) {};
+    gl.UseProgram = [](GLuint) {};
+    gl.GetUniformLocation = [](GLuint, const GLchar*) -> GLint { return 0; };
+    gl.EnableVertexAttribArray = [](GLuint) {};
+    gl.VertexAttribPointer = [](GLuint, GLint, GLenum, GLboolean, GLsizei, const void*) {};
+    gl.VertexAttribDivisorARB = [](GLuint, GLuint) {};
+    gl.DrawArrays = [](GLenum, GLint, GLsizei) {};
+    gl.DrawArraysInstancedARB = [](GLenum, GLint, GLsizei, GLsizei) {};
+    gl.Uniform1i = [](GLint, GLint) {};
+    gl.Uniform1f = [](GLint, GLfloat) {};
+    gl.Uniform3f = [](GLint, GLfloat, GLfloat, GLfloat) {};
+    gl.Uniform4f = [](GLint, GLfloat, GLfloat, GLfloat, GLfloat) {};
+    gl.UniformMatrix4fv = [](GLint, GLsizei, GLboolean, const GLfloat*) {};
+    gl.Uniform2f = [](GLint, GLfloat x, GLfloat y) {
+        if (g_gl.u2n < 16) { g_gl.u2[g_gl.u2n][0] = x; g_gl.u2[g_gl.u2n][1] = y; ++g_gl.u2n; }
+    };
+}
+
+static void testRenderTarget() {
+    installGlSpy();
+    Wall w;
+    w.streamAround(0, 0);
+    Player p;
+    const Mat4 vp = Mat4::identity();
+
+    Renderer r;
+    CHECK(r.init());
+    CHECK(r.hasRenderTarget());
+
+    // Window 1280x720, render resolution 1600x900: the scene is drawn at the
+    // resolution and scaled into the window — the window itself is untouched.
+    CHECK(r.setRenderSize(1600, 900));
+    CHECK(g_gl.texW == 1600 && g_gl.texH == 900);
+    CHECK(g_gl.rbW == 1600 && g_gl.rbH == 900);
+    int rw = 0, rh = 0;
+    r.renderSize(1280, 720, rw, rh);
+    CHECK(rw == 1600 && rh == 900);
+    CHECK(r.setRenderSize(1600, 900));        // same size: no reallocation
+
+    g_gl.viewports = 0; g_gl.blits = 0; g_gl.u2n = 0;
+    r.render(w, p, vp, 90.0f, 1280, 720, false);
+    CHECK(g_gl.vpW[0] == 1600 && g_gl.vpH[0] == 900);   // scene viewport = resolution
+    CHECK(g_gl.blits == 1);
+    CHECK(g_gl.blitFilter == GLenum(GL_LINEAR));
+    CHECK(g_gl.blitSrc[0] == 0 && g_gl.blitSrc[1] == 0);
+    CHECK(g_gl.blitSrc[2] == 1600 && g_gl.blitSrc[3] == 900);
+    // Same 16:9 aspect => the image fills the window exactly.
+    CHECK(g_gl.blitDst[0] == 0 && g_gl.blitDst[1] == 0);
+    CHECK(g_gl.blitDst[2] == 1280 && g_gl.blitDst[3] == 720);
+    // The live FOV reaches the shader (sky tangent = tan(fov/2)).
+    bool fovSeen = false;
+    for (int i = 0; i < g_gl.u2n; ++i)
+        if (std::fabs(g_gl.u2[i][1] - std::tan(deg2rad(90.0f) * 0.5f)) < 1e-3f) fovSeen = true;
+    CHECK(fovSeen);
+
+    // The overlay is drawn in window pixels: the very space the cursor is
+    // reported in, so hit-testing cannot drift when the resolution changes.
+    g_gl.viewports = 0;
+    r.uiBegin(1280, 720);
+    CHECK(g_gl.boundFb == 0);
+    CHECK(g_gl.vpW[0] == 1280 && g_gl.vpH[0] == 720);
+    r.uiEnd();
+
+    // A window with a different aspect is letterboxed, never stretched.
+    g_gl.viewports = 0; g_gl.blits = 0;
+    r.render(w, p, vp, 90.0f, 1000, 1000, false);
+    CHECK(g_gl.blits == 1);
+    const int dh = int(1000.0f / (1600.0f / 900.0f) + 0.5f);   // 16:9 into a square
+    CHECK(g_gl.blitDst[0] == 0 && g_gl.blitDst[2] == 1000);     // full width
+    CHECK(g_gl.blitDst[3] - g_gl.blitDst[1] == dh);             // height keeps aspect
+    CHECK(g_gl.blitDst[1] == (1000 - dh) / 2);                  // centred: bars top+bottom
+    CHECK(g_gl.vpW[0] == 1600 && g_gl.vpH[0] == 900);         // still the resolution
+
+    // Switching resolution changes only the render target: the reported
+    // window size is whatever the platform says, always.
+    CHECK(r.setRenderSize(1920, 1080));
+    r.renderSize(1280, 720, rw, rh);
+    CHECK(rw == 1920 && rh == 1080);
+    g_gl.viewports = 0;
+    r.render(w, p, vp, 75.0f, 1280, 720, false);
+    CHECK(g_gl.vpW[0] == 1920 && g_gl.vpH[0] == 1080);
+    r.shutdown();
+
+    // Without framebuffer support the scene simply follows the window, and
+    // nothing else changes.
+    g_gl.reset();
+    g_gl.fbComplete = false;
+    Renderer r2;
+    CHECK(r2.init());
+    CHECK(!r2.hasRenderTarget());
+    CHECK(!r2.setRenderSize(1600, 900));
+    r2.renderSize(1280, 720, rw, rh);
+    CHECK(rw == 1280 && rh == 720);
+    g_gl.viewports = 0; g_gl.blits = 0;
+    r2.render(w, p, vp, 90.0f, 1280, 720, false);
+    CHECK(g_gl.blits == 0);
+    CHECK(g_gl.vpW[0] == 1280 && g_gl.vpH[0] == 720);
+    r2.shutdown();
+
+    gl = GL{};   // leave no stub behind for the other tests
 }
 
 // ---------------------------------------------------------------------------
@@ -577,8 +838,10 @@ int main() {
     testFallForever();
     testInteraction();
     testSettings();
+    testWindowFit();
     testSensitivity();
     testMenuNav();
+    testRenderTarget();
     testRestart();
 
     fprintf(stderr, "\n[aw-tests] %d passed, %d failed\n", g_pass, g_fail);

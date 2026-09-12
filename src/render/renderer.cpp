@@ -321,12 +321,19 @@ bool Renderer::init() {
                   GL_RGBA, GL_UNSIGNED_BYTE, atlas.px);
 
     gl.BindVertexArray(0);
+
+    // ---- offscreen scene target --------------------------------------------
+    // Present from the start so a resolution-independent render path is the
+    // default; if the driver cannot do it, createTarget() fails and the scene
+    // simply renders at the window size (see renderSize()).
     ready_ = true;
+    createTarget(1280, 720);
     return true;
 }
 
 void Renderer::shutdown() {
     if (!ready_) return;
+    destroyTarget();
     if (brickProg_) gl.DeleteProgram(brickProg_);
     if (skyProg_) gl.DeleteProgram(skyProg_);
     if (crosshairProg_) gl.DeleteProgram(crosshairProg_);
@@ -348,11 +355,86 @@ void Renderer::shutdown() {
     ready_ = false;
 }
 
-int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewProj,
-                     float aspect, int width, int height, bool targetHot) {
-    if (!ready_) return 0;
+// ---------------------------------------------------------------------------
+// Offscreen scene target: the scene renders at the configured resolution and is
+// scaled into the window, so resolution and window size are independent.
+// ---------------------------------------------------------------------------
+void Renderer::destroyTarget() {
+    if (fboDepth_) gl.DeleteRenderbuffers(1, &fboDepth_);
+    if (fboColor_) gl.DeleteTextures(1, &fboColor_);
+    if (fbo_) gl.DeleteFramebuffers(1, &fbo_);
+    fbo_ = fboColor_ = fboDepth_ = 0;
+    fboW_ = fboH_ = 0;
+}
 
-    // ---- frame setup (viewport + clear every frame) -------------------------
+bool Renderer::createTarget(int w, int h) {
+    destroyTarget();
+    if (!ready_ || w <= 0 || h <= 0) return false;
+    if (!gl.GenFramebuffers || !gl.BindFramebuffer || !gl.CheckFramebufferStatus ||
+        !gl.FramebufferTexture2D || !gl.GenRenderbuffers || !gl.BindRenderbuffer ||
+        !gl.RenderbufferStorage || !gl.FramebufferRenderbuffer || !gl.BlitFramebuffer ||
+        !gl.DeleteFramebuffers || !gl.DeleteRenderbuffers)
+        return false;
+
+    gl.GenFramebuffers(1, &fbo_);
+    gl.BindFramebuffer(GL_FRAMEBUFFER, fbo_);
+
+    gl.GenTextures(1, &fboColor_);
+    gl.ActiveTexture(GL_TEXTURE0);
+    gl.BindTexture(GL_TEXTURE_2D, fboColor_);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, fboColor_, 0);
+
+    gl.GenRenderbuffers(1, &fboDepth_);
+    gl.BindRenderbuffer(GL_RENDERBUFFER, fboDepth_);
+    gl.RenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, w, h);
+    gl.FramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, fboDepth_);
+
+    const bool complete = gl.CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.BindRenderbuffer(GL_RENDERBUFFER, 0);
+    gl.BindTexture(GL_TEXTURE_2D, 0);
+    if (!complete) { destroyTarget(); return false; }
+
+    fboW_ = w;
+    fboH_ = h;
+    return true;
+}
+
+bool Renderer::setRenderSize(int w, int h) {
+    if (w <= 0 || h <= 0) return false;
+    targetW_ = w;
+    targetH_ = h;
+    if (fboW_ == w && fboH_ == h) return true;   // already allocated
+    return createTarget(w, h);
+}
+
+void Renderer::renderSize(int windowW, int windowH, int& outW, int& outH) const {
+    if (fboW_ > 0 && fboH_ > 0) { outW = fboW_; outH = fboH_; }
+    else { outW = windowW; outH = windowH; }
+}
+
+int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewProj,
+                     float fovDeg, int windowW, int windowH, bool targetHot) {
+    if (!ready_ || windowW <= 0 || windowH <= 0) return 0;
+
+    // ---- frame setup --------------------------------------------------------
+    // The scene is drawn at its own resolution (offscreen target when
+    // available, otherwise straight into the window) — never at the window
+    // size, so the resolution setting cannot disturb the window or the
+    // cursor/UI coordinate space.
+    const bool offscreen = (fboW_ > 0 && fboH_ > 0);
+    const int width = offscreen ? fboW_ : windowW;
+    const int height = offscreen ? fboH_ : windowH;
+    const float aspect = float(width) / float(height);
+
+    // (BindFramebuffer is an optional entry point: without it there is no
+    // offscreen target and the window framebuffer is the default anyway.)
+    if (gl.BindFramebuffer) gl.BindFramebuffer(GL_FRAMEBUFFER, offscreen ? fbo_ : 0u);
     gl.Viewport(0, 0, width, height);
     gl.ClearColor(0.16f, 0.19f, 0.24f, 1.0f);
     gl.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -421,7 +503,9 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     Vec3 fwd = player.forward();
     Vec3 right = normalize(cross(fwd, Vec3{0, 1, 0}));
     Vec3 up = cross(right, fwd);
-    float tanHalf = std::tan(deg2rad(FOV_DEG) * 0.5f);
+    // The sky is a fullscreen raycast, so it must use the live FOV setting and
+    // the render target's aspect — not the window's.
+    float tanHalf = std::tan(deg2rad(fovDeg) * 0.5f);
     gl.Uniform3f(skyForward_, fwd.x, fwd.y, fwd.z);
     gl.Uniform3f(skyRight_, right.x, right.y, right.z);
     gl.Uniform3f(skyUp_, up.x, up.y, up.z);
@@ -471,7 +555,37 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     gl.DrawArrays(GL_TRIANGLES, 0, 3);
     gl.Disable(GL_BLEND);
 
+    // ---- present: scale the scene into the window ---------------------------
     gl.BindVertexArray(0);
+    if (offscreen) {
+        // Letterbox ("fit"): scale to the largest rect that fits the window
+        // while keeping the render target's aspect, so nothing is stretched.
+        float dstAspect = float(windowW) / float(windowH);
+        float srcAspect = float(fboW_) / float(fboH_);
+        int dw = windowW, dh = windowH;
+        if (srcAspect > dstAspect) dh = int(float(windowW) / srcAspect + 0.5f);
+        else                       dw = int(float(windowH) * srcAspect + 0.5f);
+        int dx = (windowW - dw) / 2;
+        int dy = (windowH - dh) / 2;
+
+        // Bars first (a blit only touches its destination rect), then the image.
+        gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.Viewport(0, 0, windowW, windowH);
+        gl.Disable(GL_DEPTH_TEST);
+        gl.DepthMask(GL_FALSE);
+        gl.Disable(GL_BLEND);
+        gl.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+        gl.Clear(GL_COLOR_BUFFER_BIT);
+
+        gl.BindFramebuffer(GL_READ_FRAMEBUFFER, fbo_);
+        gl.BindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+        gl.BlitFramebuffer(0, 0, fboW_, fboH_, dx, dy, dx + dw, dy + dh,
+                           GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+        gl.Viewport(0, 0, windowW, windowH);
+        gl.Enable(GL_DEPTH_TEST);
+        gl.DepthMask(GL_TRUE);
+    }
     return visible;   // accumulated brick counts of the visible chunks
 }
 
@@ -479,6 +593,10 @@ void Renderer::uiBegin(int width, int height) {
     if (!ready_) return;
     uiWidth_ = width;
     uiHeight_ = height;
+    // The overlay is drawn on top of the presented frame, in the window's own
+    // pixel space, so menu hit-testing matches the cursor 1:1 at any
+    // resolution.
+    if (gl.BindFramebuffer) gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
     gl.Viewport(0, 0, width, height);
     gl.Disable(GL_DEPTH_TEST);
     gl.DepthMask(GL_FALSE);

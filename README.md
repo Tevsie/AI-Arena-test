@@ -31,8 +31,8 @@ code is pushed.
 > `atw.exe` is fully self-contained (x64, no install). It needs a standard
 > Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
 > AMD driver). If SmartScreen warns on first run, click **More info →
-> Run anyway**. Press `Esc` for the settings menu (volume, resolution, fullscreen,
-> sensitivity, restart, quit).
+> Run anyway**. Press `Esc` for the settings menu (volume, render resolution,
+> FOV, sensitivity, fullscreen, restart, quit).
 
 ### Build the .exe yourself on Windows (optional)
 
@@ -101,13 +101,25 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 | Setting              | What it does                                              |
 |----------------------|-----------------------------------------------------------|
 | Master volume bar    | 0–100 % loudness for all procedural sound effects         |
-| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440  |
+| Resolution           | Render resolution: 1280×720 / 1600×900 / 1920×1080 / 2560×1440 |
 | Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
+| Field of view        | Vertical FOV, 50–120° (default 75°)                        |
 | Fullscreen           | Borderless fullscreen toggle (`ON` / `OFF`)               |
 | **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
 | Resume / Quit        | Close the menu / exit the game                            |
 
 Settings apply instantly and persist to `settings.cfg` next to the executable.
+
+**Resolution is not window size.** The scene always renders at the chosen
+resolution into an offscreen target and is then scaled into the window
+(letterboxed, aspect preserved). In windowed mode the window keeps one
+consistent size — it is fitted to your display at first start, remembered in
+`settings.cfg`, and never resized or moved by the resolution setting. That also
+means picking a resolution larger than your screen is safe (it simply
+supersamples), and the menu cursor always clicks exactly where it is drawn: the
+overlay is laid out in real window pixels, the same space the OS reports the
+cursor in.
+
 Sound effects (brick pull/push, jump, land, UI clicks) are synthesized live —
 no audio files needed. Output uses WinMM on Windows and PulseAudio (with an
 ALSA fallback) on Linux; with no audio device the game simply runs silent.
@@ -158,7 +170,8 @@ src/
                  font.hpp (embedded 5x7 menu font)
   game/          constants, grid/chunk/wall (streaming + brick store),
                  player (kinematic controller), interaction (raycast pull/push),
-                 settings (volume/resolution/sensitivity/fullscreen + persistence),
+                 settings (volume/resolution/FOV/sensitivity/fullscreen +
+                 persistence, incl. the windowed window size),
                  menu (pause/settings overlay), game.cpp (loop + demo driver)
   audio/         procedural SFX mixer + synth, WinMM / PulseAudio / ALSA backends
 tests/           dependency-free unit tests (grid, store, streaming,

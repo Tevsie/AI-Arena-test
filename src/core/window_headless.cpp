@@ -40,6 +40,7 @@ public:
     void resize(int w, int h) override {
         if (w > 0 && h > 0) { width_ = w; height_ = h; }
     }
+    void screenSize(int& w, int& h) const override { w = 0; h = 0; }  // no display
     void setFullscreen(bool) override {}
     BackendInfo info() const override {
         BackendInfo b;

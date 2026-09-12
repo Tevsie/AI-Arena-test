@@ -21,7 +21,9 @@ struct FrameInput {
     // Per-frame button events (edge triggered, not held state).
     bool mousePressed[8]{};
     bool mouseReleased[8]{};
-    // Window dimensions.
+    // Window client dimensions: the real drawable size, which is also the
+    // coordinate space of mouseX/mouseY and of the UI overlay. The 3D scene
+    // renders at its own resolution and is scaled into this.
     int32_t width = 0, height = 0;
     // True when the user closed the window / asked to quit.
     bool shouldQuit = false;
@@ -51,9 +53,16 @@ public:
     // Hide/release the mouse cursor (look capture).
     virtual void setCursorCaptured(bool captured) = 0;
 
-    // Resize the window client area (used by the resolution setting). The new
-    // size is reported back through FrameInput in subsequent frames.
+    // Resize the window client area. Only the *window* setting uses this — the
+    // render resolution is a renderer concern and never touches the window.
+    // Implementations must store the size the window actually ended up with
+    // (a WM may clamp it) so the reported size never lies about the drawable.
     virtual void resize(int width, int height) = 0;
+
+    // Usable screen area of the display the window lives on (work area on
+    // Windows, root window size on X11). Used to pick a windowed size that
+    // fits; (0,0) when unknown (headless).
+    virtual void screenSize(int& width, int& height) const = 0;
 
     // Borderless fullscreen toggle (used by the fullscreen setting).
     virtual void setFullscreen(bool on) = 0;
