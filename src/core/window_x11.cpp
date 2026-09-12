@@ -153,6 +153,7 @@ struct XLib {
     x11::XSyncFn XSync = nullptr;
     x11::XCloseDisplayFn XCloseDisplay = nullptr;
     x11::XInternAtomFn XInternAtom = nullptr;
+    x11::XGetWindowAttributesFn XGetWindowAttributes = nullptr;
     x11::XSetWMProtocolsFn XSetWMProtocols = nullptr;
     x11::XChangePropertyFn XChangeProperty = nullptr;
     x11::XFreeFn XFree = nullptr;
@@ -199,6 +200,7 @@ struct XLib {
         LD(hX11, XInternAtom, "XInternAtom");
         LD(hX11, XSetWMProtocols, "XSetWMProtocols");
         LD(hX11, XChangeProperty, "XChangeProperty");
+        LD(hX11, XGetWindowAttributes, "XGetWindowAttributes");
         LD(hX11, XFree, "XFree");
 #undef LD
         // GLX / GL
@@ -304,6 +306,9 @@ public:
             x_.XSetWMProtocols(dpy_, win_, protocols, 1);
         }
         x_.XMapWindow(dpy_, win_);
+        if (x_.XSync) x_.XSync(dpy_, 0);
+        syncWindowSize();   // the WM may have adjusted the requested size
+        syncPointer();
 
         if (!x_.glXMakeCurrent(dpy_, (glx::GLXDrawable)win_, ctx_)) {
             fprintf(stderr, "[aw] glXMakeCurrent failed\n");
@@ -332,7 +337,6 @@ public:
         // Clear edge-triggered mouse events from last frame.
         for (int i = 0; i < 8; ++i) { in.mousePressed[i] = false; in.mouseReleased[i] = false; }
         in.mouseDX = 0.0f; in.mouseDY = 0.0f;
-        in.width = width_; in.height = height_;
 
         // Drain the event queue. XEvent is opaque here; we keep a raw buffer of
         // sufficient size (XEvent is 192 bytes on 64-bit) and decode the known
@@ -390,6 +394,7 @@ public:
                     if (ce->width > 0 && ce->height > 0) {
                         width_ = ce->width;
                         height_ = ce->height;
+                        if (captured_) { warpX_ = width_ / 2; warpY_ = height_ / 2; }
                     }
                     break;
                 }
@@ -397,6 +402,11 @@ public:
             }
         }
 
+        // Report size and cursor *after* the events are drained, so the UI is
+        // laid out in the very same coordinate space the cursor is reported in
+        // (a resize event processed this frame cannot desync them).
+        in.width = width_;
+        in.height = height_;
         in.mouseX = float(mouseX_);
         in.mouseY = float(mouseY_);
         // Note: Escape is a normal key now (the game toggles the settings menu
@@ -451,20 +461,37 @@ public:
         } else {
             if (x_.XUngrabPointer) x_.XUngrabPointer(dpy_, 0 /*CurrentTime*/);
             if (x_.XUndefineCursor) x_.XUndefineCursor(dpy_, win_);
+            // Releasing capture reveals the cursor wherever it was warped;
+            // adopt the real position so the menu's first hover is correct.
+            syncPointer();
         }
         if (x_.XSync) x_.XSync(dpy_, 0);
     }
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
-        // Apply immediately so the next frame already uses the new size (the
-        // async ConfigureNotify confirms it afterwards).
         width_ = w; height_ = h;
-        mouseX_ = w / 2; mouseY_ = h / 2;
         if (dpy_ && x_.XResizeWindow) {
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
             if (x_.XSync) x_.XSync(dpy_, 0);
+            // Adopt the size the window *actually* got: a window manager is
+            // free to clamp it (e.g. larger than the screen), and reporting a
+            // size the drawable does not have would offset every UI hit test.
+            syncWindowSize();
         }
+        // The OS cursor did not move just because the window did — ask where
+        // it really is instead of assuming the centre.
+        syncPointer();
+    }
+
+    void screenSize(int& w, int& h) const override {
+        w = h = 0;
+        if (!dpy_ || !x_.XGetWindowAttributes || !x_.XRootWindow || !x_.XDefaultScreen) return;
+        x11::Window root = x_.XRootWindow(dpy_, x_.XDefaultScreen(dpy_));
+        char attr[256]{};
+        if (!x_.XGetWindowAttributes(dpy_, root, attr)) return;
+        const int* ii = reinterpret_cast<const int*>(attr);
+        if (ii[2] > 0 && ii[3] > 0) { w = ii[2]; h = ii[3]; }
     }
 
     void setFullscreen(bool on) override {
@@ -488,7 +515,11 @@ public:
         constexpr long kSubstructure = (1L << 20) | (1L << 21);  // Redirect|Notify
         x_.XSendEvent(dpy_, root, 0, kSubstructure, reinterpret_cast<x11::XEvent*>(&msg));
         if (x_.XSync) x_.XSync(dpy_, 0);
-        // The window manager resizes the window; ConfigureNotify syncs width_/height_.
+        // The window manager resizes the window (ConfigureNotify would sync
+        // width_/height_ later); read the truth now so the UI and the cursor
+        // never disagree for even a frame.
+        syncWindowSize();
+        syncPointer();
     }
 
     void* loadGLProc(const char* name) override {
@@ -499,6 +530,33 @@ public:
     }
 
 private:
+    // Real window size, straight from the server. XWindowAttributes begins with
+    // {int x, y, width, height, ...}; we read it into an oversized buffer
+    // because Xlib writes the full struct (~136 B) into it.
+    void syncWindowSize() {
+        if (!dpy_ || !x_.XGetWindowAttributes) return;
+        char attr[256]{};
+        if (!x_.XGetWindowAttributes(dpy_, win_, attr)) return;
+        const int* ii = reinterpret_cast<const int*>(attr);
+        if (ii[2] > 0 && ii[3] > 0) {
+            width_ = ii[2];
+            height_ = ii[3];
+            if (captured_) { warpX_ = width_ / 2; warpY_ = height_ / 2; }
+        }
+    }
+
+    // Real cursor position in window coordinates. Used after a resize so the
+    // stored position cannot disagree with where the pointer is drawn.
+    void syncPointer() {
+        if (!dpy_ || !x_.XQueryPointer) return;
+        x11::Window root = 0, child = 0;
+        int rx = 0, ry = 0, wx = 0, wy = 0;
+        unsigned mask = 0;
+        if (x_.XQueryPointer(dpy_, win_, &root, &child, &rx, &ry, &wx, &wy, &mask)) {
+            mouseX_ = wx;
+            mouseY_ = wy;
+        }
+    }
     XLib x_;
     x11::Display* dpy_ = nullptr;
     x11::Window win_ = 0;

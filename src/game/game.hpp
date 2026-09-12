@@ -61,6 +61,11 @@ private:
     void demoDrive(float dt);
     float seedWorld();   // (re)builds the starting platform; returns its top
 
+    // Screen space left free around the windowed window (title bar / borders
+    // / taskbar) when fitting it to the display.
+    static constexpr int kWindowMarginX = 64;
+    static constexpr int kWindowMarginY = 96;
+
     Platform* platform_ = nullptr;
     Wall wall_;
     Player player_;

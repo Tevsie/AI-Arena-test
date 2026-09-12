@@ -93,18 +93,51 @@ fully testable and benchmarkable on machines without a display or GPU.
 
 ## Settings, menu & audio
 
-- `Esc` pauses the game and opens the settings overlay (volume bar, resolution
-  picker, sensitivity bar, fullscreen toggle, Restart / Resume / Quit). The
+- `Esc` pauses the game and opens the settings overlay (volume bar, render
+  resolution picker, sensitivity bar, field-of-view bar, fullscreen toggle,
+  Restart / Resume / Quit). The
   menu is driven by
   mouse (hover + click + slider drag; backends report absolute cursor position)
   and keyboard (arrows + Enter), drawn with the renderer's immediate-mode UI
   pass (colored rects + an embedded 5x7 bitmap font atlas — no font files).
-- Settings apply live (mixer gain, `Platform::resize`, look scale,
+- Settings apply live (mixer gain, `Renderer::setRenderSize`, `Settings::fov`
+  for the projection and the sky tangent, look scale,
   `Platform::setFullscreen`) and persist to `settings.cfg`. Restart clears
   the brick store, cancels lerps, reseeds the starting platform and respawns
   the player. Fullscreen is EWMH (`_NET_WM_STATE`) on X11, borderless
   monitor-cover on Win32, and a no-op headless; the saved choice is applied
   at startup.
+
+## Resolution vs. window size
+
+The scene never renders "at the window size". It is drawn into an offscreen
+target (RGBA8 color + DEPTH_COMPONENT24 renderbuffer) at the configured
+resolution and blitted into the window with `glBlitFramebuffer`, scaled to the
+largest centered rect that fits while preserving the target's aspect (bars are
+cleared first). Consequences:
+
+- **Windowed mode has one consistent size.** `Settings::windowW/H` (fitted to
+  the display via `Platform::screenSize` + `Settings::fitToScreen` at startup,
+  remembered afterwards) is the only thing that resizes the window. The
+  resolution setting never touches the window — in fullscreen either, where it
+  used to resize a borderless window with the wrong decoration math.
+- A resolution larger than the display is safe: it supersamples instead of
+  producing a window that does not fit.
+- The projection aspect comes from the render target
+  (`Renderer::renderSize`), not the window, so a letterboxed view is never
+  stretched.
+
+**Cursor/UI alignment.** The overlay is laid out and drawn in *window* pixels
+(`Renderer::uiBegin(width, height)` with the platform's real client size), the
+same coordinate space the backends report the cursor in. Previously the menu
+sized itself from the *requested* resolution while the drawable could be
+something else (OS/WM clamps the window, `AdjustWindowRect` with the wrong
+style, a size stored before the resize was applied), so hit boxes drifted away
+from the drawn cursor. Both backends now also read the real client area back
+after a resize/fullscreen switch (X11 `XGetWindowAttributes`, Win32
+`GetClientRect`) and query the actual pointer position instead of assuming the
+window centre, and `FrameInput` is filled *after* the event pump so a resize
+event processed this frame cannot desync the size from the cursor.
 - Audio is a tiny procedural engine: a mixer thread renders up to 8
   synthesized one-shots (48 kHz stereo int16) into a platform backend — WinMM
   on Windows, PulseAudio-simple with an ALSA fallback on Linux (both `dlopen`,
@@ -117,4 +150,8 @@ fully testable and benchmarkable on machines without a display or GPU.
 - The headless platform and the scripted demo driver produce deterministic runs.
 - Unit tests cover grid math, the brick store, streaming + persistence, the
   controller (landing/jumping/wall), pull/push including the occupancy rule,
-  settings (clamp/parse/modes), menu keyboard navigation, and restart.
+  settings (clamp/parse/modes/FOV/window size), menu keyboard navigation, and
+  restart. The render path is covered without a GPU by stubbing the `gl`
+  function-pointer table with recorders and asserting the scene viewport is the
+  render resolution, the blit rect is the letterboxed fit, and the UI ends up
+  in window space.

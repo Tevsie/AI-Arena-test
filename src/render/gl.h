@@ -66,6 +66,16 @@ enum : GLenum {
     GL_DEPTH_COMPONENT    = 0x1902,
     GL_DEPTH_COMPONENT16  = 0x81A5,
     GL_DEPTH_COMPONENT24  = 0x81A6,
+    // Framebuffer objects (GL 3.0 core): the renderer draws the scene into an
+    // offscreen target so the render resolution is independent of the window
+    // size, then blits it into the window (letterboxed, aspect preserved).
+    GL_FRAMEBUFFER        = 0x8D40,
+    GL_READ_FRAMEBUFFER   = 0x8CA8,
+    GL_DRAW_FRAMEBUFFER   = 0x8CA9,
+    GL_RENDERBUFFER       = 0x8D41,
+    GL_COLOR_ATTACHMENT0  = 0x8CE0,
+    GL_DEPTH_ATTACHMENT   = 0x8D00,
+    GL_FRAMEBUFFER_COMPLETE = 0x8CD5,
     GL_TEXTURE_MAG_FILTER = 0x2800,
     GL_TEXTURE_MIN_FILTER = 0x2801,
     GL_NEAREST            = 0x2600,
@@ -175,6 +185,22 @@ struct GL {
     void (*TexParameteri)(GLenum, GLenum, GLint) = nullptr;
     void (*ActiveTexture)(GLenum) = nullptr;
 
+    // framebuffers / renderbuffers (GL 3.0 core) — optional, see loadGL().
+    // Used for the offscreen render target that decouples the render
+    // resolution from the window size.
+    void (*GenFramebuffers)(GLsizei, GLuint*) = nullptr;
+    void (*DeleteFramebuffers)(GLsizei, const GLuint*) = nullptr;
+    void (*BindFramebuffer)(GLenum, GLuint) = nullptr;
+    GLenum (*CheckFramebufferStatus)(GLenum) = nullptr;
+    void (*FramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+    void (*GenRenderbuffers)(GLsizei, GLuint*) = nullptr;
+    void (*DeleteRenderbuffers)(GLsizei, const GLuint*) = nullptr;
+    void (*BindRenderbuffer)(GLenum, GLuint) = nullptr;
+    void (*RenderbufferStorage)(GLenum, GLenum, GLsizei, GLsizei) = nullptr;
+    void (*FramebufferRenderbuffer)(GLenum, GLenum, GLenum, GLuint) = nullptr;
+    void (*BlitFramebuffer)(GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint,
+                            GLbitfield, GLenum) = nullptr;
+
     // uniform buffers
     void (*BindBufferBase)(GLenum, GLuint, GLuint) = nullptr;
     void (*GetUniformBlockIndex)(GLuint, const GLchar*) = nullptr;
@@ -260,6 +286,20 @@ inline const Entry* entries() {
         {"glTexImage2D", offsetof(GL, TexImage2D)},
         {"glTexParameteri", offsetof(GL, TexParameteri)},
         {"glActiveTexture", offsetof(GL, ActiveTexture)},
+        // Framebuffers are core in 3.3 but loaded optionally: a driver without
+        // them still runs, just without resolution-independent rendering
+        // (the renderer falls back to drawing straight into the window).
+        {"glGenFramebuffers", offsetof(GL, GenFramebuffers)},
+        {"glDeleteFramebuffers", offsetof(GL, DeleteFramebuffers)},
+        {"glBindFramebuffer", offsetof(GL, BindFramebuffer)},
+        {"glCheckFramebufferStatus", offsetof(GL, CheckFramebufferStatus)},
+        {"glFramebufferTexture2D", offsetof(GL, FramebufferTexture2D)},
+        {"glGenRenderbuffers", offsetof(GL, GenRenderbuffers)},
+        {"glDeleteRenderbuffers", offsetof(GL, DeleteRenderbuffers)},
+        {"glBindRenderbuffer", offsetof(GL, BindRenderbuffer)},
+        {"glRenderbufferStorage", offsetof(GL, RenderbufferStorage)},
+        {"glFramebufferRenderbuffer", offsetof(GL, FramebufferRenderbuffer)},
+        {"glBlitFramebuffer", offsetof(GL, BlitFramebuffer)},
         {"glBindBufferBase", offsetof(GL, BindBufferBase)},
         {"glGetUniformBlockIndex", offsetof(GL, GetUniformBlockIndex)},
         {"glUniformBlockBinding", offsetof(GL, UniformBlockBinding)},
@@ -269,6 +309,21 @@ inline const Entry* entries() {
         {nullptr, 0},  // sentinel
     };
     return kEntries;
+}
+
+// Entry points the engine can live without. They are GL 3.3 core, so every
+// conforming driver has them; the optional marking only means a driver that
+// hides one still gets a running game (degraded) instead of no game at all.
+inline bool optionalEntry(const char* name) {
+    static const char* const kOptional[] = {
+        "glGenFramebuffers", "glDeleteFramebuffers", "glBindFramebuffer",
+        "glCheckFramebufferStatus", "glFramebufferTexture2D", "glGenRenderbuffers",
+        "glDeleteRenderbuffers", "glBindRenderbuffer", "glRenderbufferStorage",
+        "glFramebufferRenderbuffer", "glBlitFramebuffer",
+    };
+    for (const char* n : kOptional)
+        if (std::strcmp(name, n) == 0) return true;
+    return false;
 }
 }  // namespace detail
 
@@ -286,6 +341,7 @@ bool loadGL(F&& loader) {
         if (!p && std::strcmp(e->name, "glDrawArraysInstancedARB") == 0)
             p = loader("glDrawArraysInstanced");
         if (!p) {
+            if (detail::optionalEntry(e->name)) continue;   // degrade gracefully
             if (missing < 4) firstMissing[missing] = e->name;
             ++missing;
             continue;
@@ -298,6 +354,13 @@ bool loadGL(F&& loader) {
             std::fprintf(stderr, "  %s", firstMissing[i]);
         std::fprintf(stderr, "\n");
     }
+    // No offscreen targets => the scene renders at the window size and the
+    // resolution setting falls back to resizing the window (legacy behaviour).
+    if (!gl.GenFramebuffers || !gl.BlitFramebuffer || !gl.CheckFramebufferStatus ||
+        !gl.FramebufferTexture2D || !gl.RenderbufferStorage || !gl.FramebufferRenderbuffer ||
+        !gl.BindFramebuffer || !gl.BindRenderbuffer)
+        std::fprintf(stderr, "[aw] loadGL: no framebuffer support — resolution "
+                             "follows the window size\n");
     gl.DebugMessageCallbackARB =
         reinterpret_cast<decltype(gl.DebugMessageCallbackARB)>(loader("glDebugMessageCallback"));
     gl.ready = missing == 0;

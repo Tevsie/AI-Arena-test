@@ -57,6 +57,8 @@ constexpr float SNAP_DIST = 0.18f;        // ground snap distance (sticky feel)
 
 // Camera
 constexpr float MOUSE_SENS = 0.0022f;
+// Default vertical field of view (degrees); the live value is the user's FOV
+// setting (Settings::fov, adjustable in the menu, clamped to 50..120).
 constexpr float FOV_DEG = 75.0f;
 constexpr float NEAR_PLANE = 0.06f;
 constexpr float FAR_PLANE = 320.0f;

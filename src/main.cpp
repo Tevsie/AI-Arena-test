@@ -20,7 +20,9 @@ void printUsage() {
     fprintf(stderr,
             "usage: atw [--headless] [--frames N] [--width W] [--height H]\n"
             "  --headless   run without a window/GPU (benchmark/demo mode)\n"
-            "  --frames N   exit after N frames (headless default 1200)\n");
+            "  --frames N   exit after N frames (headless default 1200)\n"
+            "  --width W    windowed window size (default 1280x720, capped to\n"
+            "  --height H   the display); the render resolution is a menu setting\n");
 }
 
 #if defined(_WIN32)

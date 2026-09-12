@@ -1,11 +1,17 @@
-// menu.hpp — pause/settings overlay: master volume bar, resolution picker,
-// mouse sensitivity bar, fullscreen toggle, plus Restart / Resume / Quit buttons.
+// menu.hpp — pause/settings overlay: master volume bar, render-resolution
+// picker, mouse sensitivity bar, field-of-view bar, fullscreen toggle, plus
+// Restart / Resume / Quit buttons.
 //
 // Driven by mouse (hover + click + slider drag) and keyboard (Up/Down/Tab to
 // move, Left/Right to adjust, Enter to activate, Esc closes via the game).
-// Edits Settings live, applies volume/resolution immediately, and raises
-// restart/quit/resume flags consumed by Game. Rendering goes through the
-// renderer's immediate-mode UI overlay (pixels, top-left origin).
+// Edits Settings live, applies them immediately, and raises restart/quit/resume
+// flags consumed by Game. Rendering goes through the renderer's immediate-mode
+// UI overlay (window pixels, top-left origin).
+//
+// All hit-testing happens in window/client pixels — the same coordinate space
+// the platform reports the cursor in — so the overlay can never drift away
+// from the pointer. The resolution setting changes only the resolution the 3D
+// scene is rendered at; it does not touch the window.
 #pragma once
 
 #include <cstdint>
@@ -23,7 +29,8 @@ namespace aw {
 
 class Menu {
 public:
-    enum Item { Volume = 0, Resolution = 1, Sensitivity = 2, Fullscreen = 3, Restart = 4, Resume = 5, Quit = 6, Count = 7 };
+    enum Item { Volume = 0, Resolution = 1, Sensitivity = 2, Fov = 3, Fullscreen = 4,
+                Restart = 5, Resume = 6, Quit = 7, Count = 8 };
 
     void open() {
         selected_ = 0;
@@ -49,7 +56,7 @@ public:
         int hover = itemAt(in.mouseX, in.mouseY);
         if (hover >= 0) selected_ = hover;
         if (clicked && hover >= 0) {
-            if (hover == Volume || hover == Sensitivity) {
+            if (hover == Volume || hover == Sensitivity || hover == Fov) {
                 drag_ = hover;
                 setSliderFromX(hover, in.mouseX, s, a);
                 a.play(Sfx::Click);
@@ -78,7 +85,7 @@ public:
         if (edge(KEY_ENTER)) {
             if (selected_ == Resolution) cycleResolution(+1, s, a, p);
             else if (selected_ == Fullscreen) toggleFullscreen(s, a, p);
-            else if (selected_ == Volume || selected_ == Sensitivity) a.play(Sfx::Click);
+            else if (selected_ == Volume || selected_ == Sensitivity || selected_ == Fov) a.play(Sfx::Click);
             else activate(selected_, s, a);
         }
         std::memcpy(prevKeys_, in.keys, sizeof(prevKeys_));
@@ -89,34 +96,36 @@ public:
         const Layout& L = layout_;
         // Dim + panel + border.
         r.uiRect(0, 0, float(L.winW), float(L.winH), 0, 0, 0, 0.62f);
-        r.uiRect(L.px, L.py, L.pw, L.ph, 0.07f, 0.08f, 0.11f, 0.97f);
+        r.uiRect(L.px, L.py, L.pw, L.phNow, 0.07f, 0.08f, 0.11f, 0.97f);
         r.uiRect(L.px, L.py, L.pw, 2, 0.25f, 0.55f, 0.95f, 1);
-        r.uiRect(L.px, L.py + L.ph - 2, L.pw, 2, 0.25f, 0.55f, 0.95f, 1);
-        r.uiRect(L.px, L.py, 2, L.ph, 0.25f, 0.55f, 0.95f, 1);
-        r.uiRect(L.px + L.pw - 2, L.py, 2, L.ph, 0.25f, 0.55f, 0.95f, 1);
+        r.uiRect(L.px, L.py + L.phNow - 2, L.pw, 2, 0.25f, 0.55f, 0.95f, 1);
+        r.uiRect(L.px, L.py, 2, L.phNow, 0.25f, 0.55f, 0.95f, 1);
+        r.uiRect(L.px + L.pw - 2, L.py, 2, L.phNow, 0.25f, 0.55f, 0.95f, 1);
 
         drawCentered(r, "SETTINGS", 3, L.px + L.pw * 0.5f, L.py + 26, 1, 1, 1);
 
-        static const char* kLabels[4] = {"MASTER VOLUME", "RESOLUTION", "MOUSE SENSITIVITY", "FULLSCREEN"};
-        for (int i = 0; i < 4; ++i) {
+        static const char* kLabels[kRows] = {"MASTER VOLUME", "RESOLUTION", "MOUSE SENSITIVITY",
+                                             "FIELD OF VIEW", "FULLSCREEN"};
+        for (int i = 0; i < kRows; ++i) {
             bool sel = (selected_ == i);
             float cr = sel ? 1.0f : 0.62f, cg = sel ? 1.0f : 0.65f, cb = sel ? 1.0f : 0.70f;
             r.uiText(L.px + 28, L.rowY[i] + 6, 2, cr, cg, cb, 1, kLabels[i]);
             if (i == Resolution) {
                 float cx = (L.ctlX0 + L.ctlX1) * 0.5f;
                 float cw = float(textWidthPx(resText_, 2));
-                if (sel) r.uiRect(cx - cw * 0.5f - 10, L.rowY[i], cw + 20, 30, 0.22f, 0.35f, 0.55f, 1);
+                if (sel) r.uiRect(cx - cw * 0.5f - 10, L.rowY[i], cw + 20, L.rowBoxH, 0.22f, 0.35f, 0.55f, 1);
                 drawCentered(r, resText_, 2, cx, L.rowY[i] + 6, 0.88f, 0.92f, 0.96f);
             } else if (i == Fullscreen) {
                 float cx = (L.ctlX0 + L.ctlX1) * 0.5f;
                 float cw = float(textWidthPx(fsText_, 2));
-                if (sel) r.uiRect(cx - cw * 0.5f - 10, L.rowY[i], cw + 20, 30, 0.22f, 0.35f, 0.55f, 1);
+                if (sel) r.uiRect(cx - cw * 0.5f - 10, L.rowY[i], cw + 20, L.rowBoxH, 0.22f, 0.35f, 0.55f, 1);
                 drawCentered(r, fsText_, 2, cx, L.rowY[i] + 6, 0.88f, 0.92f, 0.96f);
             } else {
-                const char* val = (i == Volume) ? volText_ : sensText_;
+                const char* val = (i == Volume) ? volText_ : (i == Sensitivity) ? sensText_ : fovText_;
+                float frac = (i == Volume) ? lastVolFrac_ : (i == Sensitivity) ? lastSensFrac_ : lastFovFrac_;
                 float vw = float(textWidthPx(val, 2));
                 r.uiText(L.valX - vw, L.rowY[i] + 6, 2, 0.88f, 0.92f, 0.96f, 1, val);
-                drawSlider(r, i, (i == Volume) ? lastVolFrac_ : lastSensFrac_, sel);
+                drawSlider(r, i, frac, sel);
             }
         }
 
@@ -129,30 +138,47 @@ public:
             drawCentered(r, kButtons[i], 2, L.btnX + L.btnW * 0.5f, L.btnY[i] + 10, 1, 1, 1);
         }
 
-        drawCentered(r, "ARROWS SELECT - ENTER APPLY - ESC CLOSE", 1,
-                     L.px + L.pw * 0.5f, L.py + L.ph - 28, 0.45f, 0.48f, 0.52f);
+        // The window size is fixed; resolution only changes what is rendered
+        // into it. Showing both makes that obvious in the menu.
+        drawCentered(r, hintText_, 1,
+                     L.px + L.pw * 0.5f, L.py + L.phNow - 28, 0.45f, 0.48f, 0.52f);
     }
 
 private:
+    static constexpr int kRows = 5;   // slider/stepper rows above the buttons
+
     struct Layout {
-        static constexpr float pw = 520, ph = 500;
+        static constexpr float pw = 520, ph = 560;
         int winW = 0, winH = 0;
-        float px = 0, py = 0;
-        float rowY[4]{};
+        float px = 0, py = 0, phNow = ph;
+        float rowY[5]{};
+        float rowStep = 54;             // vertical distance between rows
+        float rowBoxH = 30;             // height of a row's selection box
         float barX = 0, barW = 0, barH = 12;
         float valX = 0;                 // value text right edge
         float ctlX0 = 0, ctlX1 = 0;     // control zone for the resolution text
-        float btnX = 0, btnW = 240, btnH = 38, btnY[3]{};
+        float btnX = 0, btnW = 240, btnH = 38, btnGap = 12, btnY[3]{};
     };
 
     void computeLayout(int w, int h) {
         Layout& L = layout_;
         L.winW = w;
         L.winH = h;
+        // A short window compresses the vertical metrics instead of pushing
+        // the buttons off the bottom edge.
+        float s = 1.0f;
+        int avail = h - 16;
+        if (avail > 0 && float(avail) < Layout::ph) s = float(avail) / float(Layout::ph);
+        if (s < 0.55f) s = 0.55f;
+        L.phNow = Layout::ph * s;
+        L.rowStep = 54.0f * s;
+        L.rowBoxH = L.rowStep - 24.0f > 18.0f ? L.rowStep - 24.0f : 18.0f;
+        L.btnH = 38.0f * s;
+        L.btnGap = 12.0f * s;
         L.px = float(w > Layout::pw ? (w - int(Layout::pw)) / 2 : 4);
-        L.py = float(h > Layout::ph ? (h - int(Layout::ph)) / 2 : 4);
-        float y0 = L.py + 92;
-        for (int i = 0; i < 4; ++i) L.rowY[i] = y0 + float(i) * 54;
+        L.py = float(h > L.phNow ? (h - int(L.phNow)) / 2 : 8);
+        float y0 = L.py + 92.0f * s;
+        for (int i = 0; i < kRows; ++i) L.rowY[i] = y0 + float(i) * L.rowStep;
         L.valX = L.px + Layout::pw - 28;
         L.barX = L.px + 300;
         L.barW = L.valX - 64 - L.barX;  // room for the right-aligned value
@@ -160,15 +186,15 @@ private:
         L.ctlX0 = L.px + 290;
         L.ctlX1 = L.px + Layout::pw - 28;
         L.btnX = L.px + (Layout::pw - L.btnW) * 0.5f;
-        float by = y0 + 4 * 54 + 18;
-        for (int i = 0; i < 3; ++i) L.btnY[i] = by + float(i) * (L.btnH + 12);
+        float by = y0 + kRows * L.rowStep + 18.0f * s;
+        for (int i = 0; i < 3; ++i) L.btnY[i] = by + float(i) * (L.btnH + L.btnGap);
     }
 
     int itemAt(float mx, float my) const {
         const Layout& L = layout_;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < kRows; ++i) {
             if (mx >= L.px + 12 && mx <= L.px + Layout::pw - 12 &&
-                my >= L.rowY[i] - 4 && my <= L.rowY[i] + 44)
+                my >= L.rowY[i] - 4 && my <= L.rowY[i] + L.rowStep - 10)
                 return i;
         }
         for (int i = 0; i < 3; ++i) {
@@ -188,6 +214,9 @@ private:
             a.setVolume(frac);
         } else if (item == Sensitivity) {
             s.sensitivity = 0.1f + frac * (3.0f - 0.1f);
+        } else if (item == Fov) {
+            s.fov = Settings::kFovMin + frac * (Settings::kFovMax - Settings::kFovMin);
+            s.clamp();
         }
     }
 
@@ -201,6 +230,10 @@ private:
             s.sensitivity += float(dir) * 0.1f;
             s.clamp();
             a.play(Sfx::Click);
+        } else if (item == Fov) {
+            s.fov += float(dir) * 2.5f;
+            s.clamp();
+            a.play(Sfx::Click);
         } else if (item == Resolution) {
             cycleResolution(dir, s, a, p);
         } else if (item == Fullscreen) {
@@ -208,9 +241,11 @@ private:
         }
     }
 
-    void cycleResolution(int dir, Settings& s, Audio& a, Platform& p) {
+    // Resolution is a render-resolution setting only: the window keeps its
+    // size (see Renderer::setRenderSize), so nothing here touches the window
+    // and the cursor/coordinate space stays put.
+    void cycleResolution(int dir, Settings& s, Audio& a, Platform&) {
         s.cycleMode(dir);
-        p.resize(s.width, s.height);
         a.play(Sfx::Click);
     }
 
@@ -230,15 +265,24 @@ private:
         s.clamp();
         lastVolFrac_ = s.volume;
         lastSensFrac_ = (s.sensitivity - 0.1f) / (3.0f - 0.1f);
+        lastFovFrac_ = (s.fov - Settings::kFovMin) / (Settings::kFovMax - Settings::kFovMin);
         std::snprintf(volText_, sizeof(volText_), "%d%%", int(s.volume * 100.0f + 0.5f));
         std::snprintf(sensText_, sizeof(sensText_), "%d%%", int(s.sensitivity * 100.0f + 0.5f));
+        std::snprintf(fovText_, sizeof(fovText_), "%d", int(s.fov + 0.5f));
         std::snprintf(resText_, sizeof(resText_), "< %dx%d >", s.width, s.height);
         std::snprintf(fsText_, sizeof(fsText_), "< %s >", s.fullscreen ? "ON" : "OFF");
+        if (s.fullscreen)
+            std::snprintf(hintText_, sizeof(hintText_),
+                          "FULLSCREEN - ARROWS SELECT - ENTER APPLY - ESC CLOSE");
+        else
+            std::snprintf(hintText_, sizeof(hintText_),
+                          "WINDOW %dx%d - ARROWS SELECT - ENTER APPLY - ESC CLOSE",
+                          layout_.winW, layout_.winH);
     }
 
     void drawSlider(Renderer& r, int item, float frac, bool sel) const {
         const Layout& L = layout_;
-        float y = layout_.rowY[item] + 8;
+        float y = layout_.rowY[item] + 8.0f;
         r.uiRect(L.barX, y, L.barW, L.barH, 0.16f, 0.18f, 0.22f, 1);
         float fw = L.barW * frac;
         if (fw > 0.5f)
@@ -256,8 +300,9 @@ private:
     }
 
     Layout layout_;
-    char volText_[8]{}, sensText_[8]{}, resText_[24]{}, fsText_[12]{};
-    float lastVolFrac_ = 0.8f, lastSensFrac_ = 0.5f;
+    char volText_[8]{}, sensText_[8]{}, fovText_[8]{}, resText_[24]{}, fsText_[12]{};
+    char hintText_[64]{};
+    float lastVolFrac_ = 0.8f, lastSensFrac_ = 0.5f, lastFovFrac_ = 0.5f;
     int selected_ = 0;
     int drag_ = -1;
     bool mouseHeld_ = false;
