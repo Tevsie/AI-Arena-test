@@ -41,6 +41,9 @@ public:
         if (w > 0 && h > 0) { width_ = w; height_ = h; }
     }
     void setFullscreen(bool) override {}
+    // No monitor to query: headless runs keep whatever size they were given.
+    bool maxWindowSize(int& w, int& h) const override { w = 0; h = 0; return false; }
+    bool clientSize(int& w, int& h) const override { w = width_; h = height_; return true; }
     BackendInfo info() const override {
         BackendInfo b;
         b.hasWindow = false;

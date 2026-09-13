@@ -449,14 +449,70 @@ static void testSettings() {
     CHECK(c.parse("bogus=123\nvolume=0.5\n"));
     CHECK_NEAR(c.volume, 0.5, 1e-6);
     CHECK_NEAR(c.sensitivity, 1.0, 1e-6);
-    // resolution modes
-    CHECK(a.modeIndex() == 2);
-    a.setMode(0);
-    CHECK(a.width == 1280 && a.height == 720);
-    a.cycleMode(1);
-    CHECK(a.width == 1600 && a.height == 900);
-    a.cycleMode(-1);
-    CHECK(a.width == 1280 && a.height == 720);
+    CHECK_NEAR(c.fov, Settings::kFovDefault, 1e-6);
+
+    // field of view: default, roundtrip, clamping
+    CHECK_NEAR(Settings().fov, 75.0, 1e-6);
+    Settings f;
+    f.fov = 95.0f;
+    char fbuf[256];
+    f.serialize(fbuf, sizeof(fbuf));
+    Settings f2;
+    CHECK(f2.parse(fbuf));
+    CHECK_NEAR(f2.fov, 95.0, 1e-3);
+    f.fov = 500.0f; f.clamp();
+    CHECK_NEAR(f.fov, Settings::kFovMax, 1e-6);
+    f.fov = 0.0f; f.clamp();
+    CHECK_NEAR(f.fov, Settings::kFovMin, 1e-6);
+
+    // ---- monitor-aware window sizes ---------------------------------------
+    Resolution modes[Settings::kMaxWindowModes];
+    // Unknown monitor (headless): every preset is offered.
+    int n = Settings::windowModes(modes, Settings::kMaxWindowModes, 0, 0);
+    CHECK(n == Settings::kModes);
+    // 1080p screen: 1440p is dropped and the usable area equals the 1080p
+    // preset, so it is not offered twice.
+    n = Settings::windowModes(modes, Settings::kMaxWindowModes, 1920, 1080);
+    CHECK(n == 3);
+    CHECK(modes[2].w == 1920 && modes[2].h == 1080);
+    // Roomier than every preset: presets + the usable area as the MAX entry.
+    n = Settings::windowModes(modes, Settings::kMaxWindowModes, 3840, 2080);
+    CHECK(n == Settings::kMaxWindowModes);
+    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2080);
+    // Tiny screen: only the largest usable size remains.
+    n = Settings::windowModes(modes, Settings::kMaxWindowModes, 640, 400);
+    CHECK(n == 1);
+    CHECK(modes[0].w == 640 && modes[0].h == 400);
+
+    // A size saved on a big monitor is snapped down on a small one.
+    Settings w;
+    w.width = 2560; w.height = 1440;
+    w.fitToMonitor(1366, 728);
+    CHECK(w.width == 1366 && w.height == 728);
+    // Cycling on that small screen skips 900p/1080p/1440p entirely.
+    w.width = 1280; w.height = 720;
+    w.cycleMode(+1, 1366, 728);
+    CHECK(w.width == 1366 && w.height == 728);
+    w.cycleMode(+1, 1366, 728);
+    CHECK(w.width == 1280 && w.height == 720);   // wraps around
+    w.cycleMode(-1, 1366, 728);
+    CHECK(w.width == 1366 && w.height == 728);
+    for (int i = 0; i < 8; ++i) {
+        w.cycleMode(+1, 1366, 728);
+        CHECK(w.width <= 1366 && w.height <= 728);   // never larger than the monitor
+    }
+    // Presets stay reachable on a large monitor.
+    w.width = 1280; w.height = 720;
+    w.cycleMode(+1, 3840, 2080);
+    CHECK(w.width == 1600 && w.height == 900);
+    w.cycleMode(-1, 3840, 2080);
+    CHECK(w.width == 1280 && w.height == 720);
+    // Unknown monitor: plain preset cycling (unchanged legacy behaviour).
+    w.width = 1280; w.height = 720;
+    w.cycleMode(+1, 0, 0);
+    CHECK(w.width == 1600 && w.height == 900);
+    w.cycleMode(-1, 0, 0);
+    CHECK(w.width == 1280 && w.height == 720);
 }
 
 // ---------------------------------------------------------------------------
@@ -483,18 +539,23 @@ static void testMenuNav() {
     m.open();
 
     auto frame = [&](uint32_t key) {
-        FrameInput in = zeroInput();
+        // Frame input straight from the backend, like the game loop does: this
+        // is what carries the real client size into the menu. The cursor is
+        // parked off the panel so this stays a keyboard-only test.
+        FrameInput in;
+        plat->frame(in);
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
         if (key) in.keys[key] = 1;
         m.update(in, s, audio, *plat);
     };
-    // Down x4 -> Restart; Enter -> restart flag.
-    for (int i = 0; i < 4; ++i) { frame(KEY_DOWN); frame(0); }
+    // Down x5 (volume, resolution, fov, sensitivity, fullscreen) -> Restart.
+    for (int i = 0; i < 5; ++i) { frame(KEY_DOWN); frame(0); }
     CHECK(m.selected() == Menu::Restart);
     frame(KEY_ENTER); frame(0);
     CHECK(m.consumeRestart());
     CHECK(!m.consumeRestart());
     // Up wraps to the top (volume); Right raises the volume bar.
-    for (int i = 0; i < 4; ++i) { frame(KEY_UP); frame(0); }
+    for (int i = 0; i < 5; ++i) { frame(KEY_UP); frame(0); }
     CHECK(m.selected() == Menu::Volume);
     float v0 = s.volume;
     frame(KEY_RIGHT); frame(0);
@@ -510,6 +571,19 @@ static void testMenuNav() {
     FrameInput probe = zeroInput();
     plat->frame(probe);
     CHECK(probe.width == s.width && probe.height == s.height);
+    // Field of view: arrows step it and it stays inside the slider range.
+    frame(KEY_DOWN); frame(0);
+    CHECK(m.selected() == Menu::Fov);
+    float f0 = s.fov;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.fov > f0);
+    frame(KEY_LEFT); frame(0);
+    CHECK_NEAR(s.fov, f0, 1e-6);
+    for (int i = 0; i < 30; ++i) { frame(KEY_RIGHT); frame(0); }
+    CHECK(s.fov <= Settings::kFovMax);
+    for (int i = 0; i < 60; ++i) { frame(KEY_LEFT); frame(0); }
+    CHECK(s.fov >= Settings::kFovMin);
+    for (int i = 0; i < 20; ++i) { frame(KEY_RIGHT); frame(0); }
     // Fullscreen toggles via Enter and arrows (headless backend ignores it).
     frame(KEY_DOWN); frame(0);  // sensitivity
     frame(KEY_DOWN); frame(0);  // fullscreen
@@ -532,6 +606,176 @@ static void testMenuNav() {
     audio.shutdown();
     plat->shutdown();
     delete plat;
+}
+
+// ---------------------------------------------------------------------------
+// Windowed backend with a configurable monitor: exercises the monitor-aware
+// window sizing (and the menu's resolution row) without a real display.
+class StubPlatform final : public Platform {
+public:
+    bool init(const char*, int w, int h) override {
+        width_ = w; height_ = h;
+        return true;
+    }
+    bool frame(FrameInput& in) override {
+        for (int i = 0; i < 8; ++i) { in.mousePressed[i] = false; in.mouseReleased[i] = false; }
+        std::memset(in.keys, 0, sizeof(in.keys));
+        in.mouseDX = in.mouseDY = 0.0f;
+        in.mouseX = float(width_ / 2); in.mouseY = float(height_ / 2);
+        in.width = width_; in.height = height_;
+        in.shouldQuit = false;
+        return true;
+    }
+    void swapBuffers() override {}
+    void shutdown() override {}
+    void setCursorCaptured(bool) override {}
+    // Mirrors the real backends: a request larger than the monitor is clamped.
+    void resize(int w, int h) override {
+        if (w <= 0 || h <= 0) return;
+        if (availW_ > 0 && w > availW_) w = availW_;
+        if (availH_ > 0 && h > availH_) h = availH_;
+        width_ = w; height_ = h;
+    }
+    void setFullscreen(bool on) override { fullscreen_ = on; }
+    bool maxWindowSize(int& w, int& h) const override {
+        if (availW_ <= 0 || availH_ <= 0) return false;
+        w = availW_; h = availH_;
+        return true;
+    }
+    bool clientSize(int& w, int& h) const override { w = width_; h = height_; return true; }
+    BackendInfo info() const override {
+        BackendInfo b;
+        b.hasWindow = true;
+        b.hasGL = false;
+        b.name = "stub";
+        return b;
+    }
+    void* loadGLProc(const char*) override { return nullptr; }
+
+    float uiScale() const override { return uiScale_; }
+
+    void setMonitor(int w, int h) { availW_ = w; availH_ = h; }
+    void setUiScale(float s) { uiScale_ = s; }
+    int width() const { return width_; }
+    int height() const { return height_; }
+
+private:
+    int availW_ = 0, availH_ = 0;   // largest usable client size (0 = unknown)
+    int width_ = 1280, height_ = 720;
+    bool fullscreen_ = false;
+    float uiScale_ = 1.0f;
+};
+
+// ---------------------------------------------------------------------------
+static void testUiScale() {
+    // DPI-derived scale is quantized to half steps and clamped (96 dpi -> 1.0,
+    // 120/144 dpi -> 1.5, 192 dpi -> 2.0).
+    CHECK_NEAR(quantizeUiScale(1.0f), 1.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(1.25f), 1.5, 1e-6);
+    CHECK_NEAR(quantizeUiScale(1.5f), 1.5, 1e-6);
+    CHECK_NEAR(quantizeUiScale(1.75f), 2.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(2.0f), 2.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(0.5f), 1.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(0.0f), 1.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(4.0f), 2.0, 1e-6);
+    // The panel must always fit the window: the scale drops back if needed.
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 3840, 2160), 2.0, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 1600, 1200), 2.0, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 1280, 720), 1.0, 1e-6);    // 2.0/1.5 too tall
+    CHECK_NEAR(Menu::fitUiScale(1.5f, 2560, 1440), 1.5, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(1.0f, 800, 600), 1.0, 1e-6);
+    // Menu clicks still land on the row the cursor is over on a scaled display.
+    StubPlatform plat;
+    plat.setMonitor(1600, 1200);
+    plat.setUiScale(2.0f);
+    plat.init("t", 1600, 1200);
+    Audio audio;
+    audio.init(false);
+    Settings s;
+    Menu m;
+    m.open();
+    // With a 2.0 UI scale the panel is 1120x1120, centred in 1600x1200: the
+    // Resume button (2nd of 3) sits around y = 600 + 300 + 200 = ...
+    auto clickAt = [&](float x, float y) {
+        FrameInput in;
+        plat.frame(in);
+        in.mouseX = x; in.mouseY = y;
+        in.mousePressed[MBTN_LEFT] = true;
+        m.update(in, s, audio, plat);
+        in.mousePressed[MBTN_LEFT] = false;
+        plat.frame(in);
+        in.mouseX = x; in.mouseY = y;
+        m.update(in, s, audio, plat);
+    };
+    // Buttons are centred horizontally; clicking the middle button's row must
+    // select Resume rather than something else.
+    const float cx = 1600 * 0.5f;
+    const float resumeY = (1200 - 1120) / 2.0f + (92 + 5 * 54 + 18 + (38 + 12)) * 2.0f + 38.0f;
+    clickAt(cx, resumeY);
+    CHECK(m.selected() == Menu::Resume);
+    CHECK(m.consumeResume());
+    audio.shutdown();
+    plat.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+static void testWindowSizing() {
+    // A 1366x768 laptop: the work area fits 720p and nothing bigger.
+    StubPlatform plat;
+    plat.setMonitor(1366, 728);
+    plat.init("t", 1280, 720);
+    Audio audio;
+    audio.init(false);
+    Settings s;
+    Menu m;
+    m.open();
+
+    auto frame = [&](uint32_t key) {
+        FrameInput in;
+        plat.frame(in);
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
+        if (key) in.keys[key] = 1;
+        m.update(in, s, audio, plat);
+    };
+
+    frame(KEY_DOWN); frame(0);   // resolution row
+    CHECK(m.selected() == Menu::Resolution);
+    CHECK(s.width == 1280 && s.height == 720);
+    // Stepping up offers the largest window the screen allows, not 1080p.
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.width == 1366 && s.height == 728);
+    CHECK(plat.width() == 1366 && plat.height() == 728);   // backend resized
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.width == 1280 && s.height == 720);             // wraps around
+    // Whatever the navigation does, the window never exceeds the monitor.
+    for (int i = 0; i < 6; ++i) {
+        frame(KEY_RIGHT); frame(0);
+        CHECK(s.width <= 1366 && s.height <= 728);
+        CHECK(plat.width() <= 1366 && plat.height() <= 728);
+    }
+    // Fullscreen on: the borderless window already covers the monitor, so the
+    // resolution row only records the preference (nothing is resized).
+    int keepW = s.width, keepH = s.height;
+    for (int i = 0; i < 3; ++i) { frame(KEY_DOWN); frame(0); }
+    CHECK(m.selected() == Menu::Fullscreen);
+    frame(KEY_ENTER); frame(0);
+    CHECK(s.fullscreen);
+    CHECK(s.width == keepW && s.height == keepH);
+    int platW = plat.width(), platH = plat.height();
+    for (int i = 0; i < 3; ++i) { frame(KEY_UP); frame(0); }
+    CHECK(m.selected() == Menu::Resolution);
+    frame(KEY_RIGHT); frame(0);                    // cycle resolution while fullscreen
+    CHECK(s.width <= 1366 && s.height <= 728);
+    CHECK(plat.width() == platW && plat.height() == platH);
+    // Leaving fullscreen applies the chosen windowed size again.
+    for (int i = 0; i < 3; ++i) { frame(KEY_DOWN); frame(0); }
+    CHECK(m.selected() == Menu::Fullscreen);
+    frame(KEY_LEFT); frame(0);
+    CHECK(!s.fullscreen);
+    CHECK(plat.width() == s.width && plat.height() == s.height);
+
+    audio.shutdown();
+    plat.shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -579,6 +823,8 @@ int main() {
     testSettings();
     testSensitivity();
     testMenuNav();
+    testUiScale();
+    testWindowSizing();
     testRestart();
 
     fprintf(stderr, "\n[aw-tests] %d passed, %d failed\n", g_pass, g_fail);

@@ -27,6 +27,17 @@ struct FrameInput {
     bool shouldQuit = false;
 };
 
+// Quantize a DPI-derived UI scale onto the supported half steps, clamped to
+// 1.0..2.0: 96 dpi -> 1.0, 120/144 dpi -> 1.5, 192 dpi -> 2.0. Half steps keep
+// the menu's pixel font and panel layout aligned (see Menu::computeLayout).
+inline float quantizeUiScale(float scale) {
+    if (!(scale > 1.0f)) return 1.0f;          // also catches NaN
+    if (scale > 2.0f) scale = 2.0f;
+    int half = int(scale * 2.0f + 0.5f);       // 1.0 -> 2, 1.5 -> 3, 2.0 -> 4
+    if (half < 2) half = 2;
+    return float(half) * 0.5f;
+}
+
 // Backend capability flags.
 struct BackendInfo {
     bool hasWindow = false;
@@ -51,12 +62,38 @@ public:
     // Hide/release the mouse cursor (look capture).
     virtual void setCursorCaptured(bool captured) = 0;
 
-    // Resize the window client area (used by the resolution setting). The new
-    // size is reported back through FrameInput in subsequent frames.
+    // Resize the window client area (used by the resolution setting). The
+    // backend clamps the request so the window always fits on the monitor. The
+    // new size is reported back through FrameInput in subsequent frames.
     virtual void resize(int width, int height) = 0;
 
     // Borderless fullscreen toggle (used by the fullscreen setting).
     virtual void setFullscreen(bool on) = 0;
+
+    // Largest client size (pixels) a *windowed* window may have while still
+    // being fully visible on the monitor's usable area (screen minus taskbar
+    // and window decorations). May be called before init(); returns false when
+    // the backend cannot tell (headless), in which case nothing is clamped.
+    virtual bool maxWindowSize(int& width, int& height) const {
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    // Current client size in pixels. Normally identical to the size reported by
+    // the last frame(), but already updated right after resize() so callers can
+    // render the new size in the very same frame. Returns false when unknown.
+    virtual bool clientSize(int& width, int& height) const {
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    // Scale factor for the fixed-pixel UI (settings menu): 1.0 at 96 dpi,
+    // larger on high-DPI displays so the menu keeps its apparent size now that
+    // the window really is in screen pixels. Quantized to half steps (see
+    // quantizeUiScale) so the bitmap font stays crisp.
+    virtual float uiScale() const { return 1.0f; }
 
     // GL function loading (no-op on headless). Returns nullptr if not loaded.
     virtual void* loadGLProc(const char* name) = 0;

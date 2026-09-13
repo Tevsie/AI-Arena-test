@@ -101,11 +101,24 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 | Setting              | What it does                                              |
 |----------------------|-----------------------------------------------------------|
 | Master volume bar    | 0–100 % loudness for all procedural sound effects         |
-| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440  |
+| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440 (only the sizes your monitor can show, plus a `MAX` entry = the largest window that fits the screen) |
+| Field of view        | Vertical FOV, 55–110° (default 75°)                       |
 | Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
 | Fullscreen           | Borderless fullscreen toggle (`ON` / `OFF`)               |
 | **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
 | Resume / Quit        | Close the menu / exit the game                            |
+
+Windowed mode always fits your monitor: the requested size is clamped to the
+work area (screen minus taskbar and window decorations), sizes that cannot be
+shown are skipped by the resolution picker, a saved `settings.cfg` size is
+fitted down at startup, and the window is re-fitted if you move it to another
+display or change the desktop resolution. On Windows the process declares
+per-monitor DPI awareness *before* the window is created, so the client area,
+the GL viewport and the mouse coordinates are all in real screen pixels —
+otherwise a scaled (125 %/150 %) display makes windows physically larger than
+the screen and makes clicks land away from the cursor. The settings menu uses
+that same DPI to scale itself (1× / 1.5× / 2×, shrinking back if it would not
+fit the window) so it keeps its apparent size on high-DPI displays.
 
 Settings apply instantly and persist to `settings.cfg` next to the executable.
 Sound effects (brick pull/push, jump, land, UI clicks) are synthesized live —

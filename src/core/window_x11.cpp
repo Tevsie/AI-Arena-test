@@ -53,6 +53,8 @@ using XLookupKeysymFn = KeySym (*)(void*, int);
 using XKeysymToKeycodeFn = unsigned (*)(Display*, KeySym);
 using XWarpPointerFn = int (*)(Display*, Window, Window, int, int, unsigned, unsigned, int, int);
 using XResizeWindowFn = int (*)(Display*, Window, unsigned, unsigned);
+using XDisplayWidthFn = int (*)(Display*, int);
+using XDisplayHeightFn = int (*)(Display*, int);
 using XSendEventFn = int (*)(Display*, Window, int, long, XEvent*);
 using XQueryPointerFn = int (*)(Display*, Window, Window*, Window*, int*, int*, int*, int*, unsigned*);
 using XGrabPointerFn = int (*)(Display*, Window, int, unsigned, int, int, Window, Cursor, Time);
@@ -140,6 +142,8 @@ struct XLib {
     x11::XKeysymToKeycodeFn XKeysymToKeycode = nullptr;
     x11::XWarpPointerFn XWarpPointer = nullptr;
     x11::XResizeWindowFn XResizeWindow = nullptr;
+    x11::XDisplayWidthFn XDisplayWidth = nullptr;
+    x11::XDisplayHeightFn XDisplayHeight = nullptr;
     x11::XSendEventFn XSendEvent = nullptr;
     x11::XQueryPointerFn XQueryPointer = nullptr;
     x11::XGrabPointerFn XGrabPointer = nullptr;
@@ -184,6 +188,8 @@ struct XLib {
         LD(hX11, XKeysymToKeycode, "XKeysymToKeycode");
         LD(hX11, XWarpPointer, "XWarpPointer");
         LD(hX11, XResizeWindow, "XResizeWindow");
+        LD(hX11, XDisplayWidth, "XDisplayWidth");
+        LD(hX11, XDisplayHeight, "XDisplayHeight");
         LD(hX11, XSendEvent, "XSendEvent");
         LD(hX11, XQueryPointer, "XQueryPointer");
         LD(hX11, XGrabPointer, "XGrabPointer");
@@ -371,9 +377,14 @@ public:
                     auto* me = reinterpret_cast<XMotionEvent*>(evbuf);
                     mouseX_ = me->x; mouseY_ = me->y;
                     if (captured_) {
+                        // Window-relative coordinates: (x, y) describe the
+                        // pointer relative to the event window (the game
+                        // window, due to the pointer grab), so the delta from
+                        // the centre we warp to is correct no matter where the
+                        // window sits on the screen.
                         int cx = width_ / 2, cy = height_ / 2;
-                        in.mouseDX += float(me->x_root - warpX_);
-                        in.mouseDY += float(me->y_root - warpY_);
+                        in.mouseDX += float(me->x - warpX_);
+                        in.mouseDY += float(me->y - warpY_);
                         warpX_ = cx; warpY_ = cy;
                         x_.XWarpPointer(dpy_, 0, win_, 0, 0, 0, 0, cx, cy);
                     }
@@ -457,6 +468,14 @@ public:
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
+        // A windowed window must never be bigger than the screen (the
+        // resolution setting asks for a preset, the display decides how much
+        // of it fits).
+        int maxW = 0, maxH = 0;
+        if (maxWindowSize(maxW, maxH)) {
+            if (w > maxW) w = maxW;
+            if (h > maxH) h = maxH;
+        }
         // Apply immediately so the next frame already uses the new size (the
         // async ConfigureNotify confirms it afterwards).
         width_ = w; height_ = h;
@@ -465,6 +484,27 @@ public:
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
             if (x_.XSync) x_.XSync(dpy_, 0);
         }
+    }
+
+    // Largest windowed client size that still fits on the screen. X11 exposes
+    // the raw screen size (not the work area); subtract a conservative
+    // allowance for window decorations, which the WM adds on top of the client
+    // area and whose size is only known after the window is mapped.
+    bool maxWindowSize(int& w, int& h) const override {
+        w = 0; h = 0;
+        if (!dpy_ || !x_.XDisplayWidth || !x_.XDisplayHeight) return false;
+        int screen = x_.XDefaultScreen(dpy_);
+        int sw = x_.XDisplayWidth(dpy_, screen) - 8;
+        int sh = x_.XDisplayHeight(dpy_, screen) - 48;
+        if (sw <= 0 || sh <= 0) return false;
+        w = sw > 320 ? sw : 320;
+        h = sh > 200 ? sh : 200;
+        return true;
+    }
+
+    bool clientSize(int& w, int& h) const override {
+        w = width_; h = height_;
+        return w > 0 && h > 0;
     }
 
     void setFullscreen(bool on) override {

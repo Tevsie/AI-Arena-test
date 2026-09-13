@@ -94,13 +94,27 @@ fully testable and benchmarkable on machines without a display or GPU.
 ## Settings, menu & audio
 
 - `Esc` pauses the game and opens the settings overlay (volume bar, resolution
-  picker, sensitivity bar, fullscreen toggle, Restart / Resume / Quit). The
-  menu is driven by
+  picker, field-of-view bar, sensitivity bar, fullscreen toggle, Restart /
+  Resume / Quit). The menu is driven by
   mouse (hover + click + slider drag; backends report absolute cursor position)
   and keyboard (arrows + Enter), drawn with the renderer's immediate-mode UI
   pass (colored rects + an embedded 5x7 bitmap font atlas — no font files).
-- Settings apply live (mixer gain, `Platform::resize`, look scale,
-  `Platform::setFullscreen`) and persist to `settings.cfg`. Restart clears
+- Window sizes are monitor aware (`Platform::maxWindowSize`): the resolution
+  picker only offers presets the display can actually show plus a `MAX` entry
+  for the largest window that fits the work area, and `Platform::resize`
+  clamps every request, so windowed mode can never produce a window larger than
+  the screen. On Windows the process also declares per-monitor DPI awareness
+  before creating the window (otherwise a scaled desktop virtualizes the client
+  area: windows come out physically bigger than requested and mouse coordinates
+  no longer match what is drawn) and follows `WM_DPICHANGED` /
+  `WM_DISPLAYCHANGE` by re-fitting the window. The overlay itself is laid out
+  in pixels scaled by `Platform::uiScale` (DPI quantized to 1.0/1.5/2.0 with a
+  matching integer bitmap-font scale) so it keeps its apparent size on a
+  high-DPI display, dropping back a step when the panel would not fit the
+  window.
+- Settings apply live (mixer gain, `Platform::resize`, projection FOV and sky
+  half-FOV tangents, look scale, `Platform::setFullscreen`) and persist to
+  `settings.cfg`. Restart clears
   the brick store, cancels lerps, reseeds the starting platform and respawns
   the player. Fullscreen is EWMH (`_NET_WM_STATE`) on X11, borderless
   monitor-cover on Win32, and a no-op headless; the saved choice is applied

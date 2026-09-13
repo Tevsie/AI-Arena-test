@@ -3,10 +3,28 @@
 // core context, loads every GL entry point at runtime, and translates Win32
 // input into the engine's FrameInput. Mirrors the X11 backend's behaviour so
 // the game code is backend-agnostic.
+//
+// DPI handling: the process declares per-monitor DPI awareness before the first
+// window is created. Without it Windows "virtualizes" the window — the app
+// (and therefore the GL viewport) works in scaled-down coordinates while the
+// window is physically larger — which is what made a 1920x1080 request bigger
+// than a 1920x1080 screen and made clicks land away from the cursor. Being
+// DPI aware means client pixels are real screen pixels: window sizes, the GL
+// viewport and mouse coordinates all agree. Windowed sizes are additionally
+// clamped to the monitor's work area (screen minus taskbar and decorations).
 #include "platform.hpp"
 
 #if defined(_WIN32)
 
+// Windows 7 API level. Everything newer (DPI awareness contexts, per-monitor
+// DPI queries, DPI-aware window metrics) is resolved dynamically below and
+// simply skipped on older systems.
+#ifndef WINVER
+#define WINVER 0x0601
+#endif
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0601
+#endif
 #define WIN32_LEAN_AND_MEAN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -40,6 +58,79 @@ using PFNWGLCREATECONTEXTATTRIBSARBPROC = HGLRC(WINAPI*)(HDC, HGLRC, const int*)
 #define WGL_CONTEXT_CORE_PROFILE_BIT_ARB 0x00000001
 #endif
 
+// Window messages that older headers may not define (guarded by SDK version).
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+#ifndef WM_DISPLAYCHANGE
+#define WM_DISPLAYCHANGE 0x007E
+#endif
+
+// Smallest window the settings allow (mirrors Settings::kMinWindow*).
+constexpr int kMinWindowW = 320;
+constexpr int kMinWindowH = 200;
+
+// ---- Dynamic entry points (post-Windows-7 APIs) ----------------------------
+using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
+using SetProcessDpiAwarenessFn = long(WINAPI*)(int);   // HRESULT(shcore.dll)
+using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+using GetDpiForSystemFn = UINT(WINAPI*)();
+using AdjustWindowRectExForDpiFn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+
+struct WinApi {
+    SetProcessDpiAwarenessContextFn setDpiAwarenessContext = nullptr;
+    SetProcessDpiAwarenessFn setProcessDpiAwareness = nullptr;
+    GetDpiForWindowFn getDpiForWindow = nullptr;
+    GetDpiForSystemFn getDpiForSystem = nullptr;
+    AdjustWindowRectExForDpiFn adjustWindowRectForDpi = nullptr;
+};
+
+const WinApi& winApi() {
+    static WinApi api = []() {
+        WinApi a;
+        HMODULE user32 = GetModuleHandleA("user32.dll");
+        if (!user32) user32 = LoadLibraryA("user32.dll");
+        if (user32) {
+            a.setDpiAwarenessContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+                reinterpret_cast<void*>(GetProcAddress(user32, "SetProcessDpiAwarenessContext")));
+            a.getDpiForWindow = reinterpret_cast<GetDpiForWindowFn>(
+                reinterpret_cast<void*>(GetProcAddress(user32, "GetDpiForWindow")));
+            a.getDpiForSystem = reinterpret_cast<GetDpiForSystemFn>(
+                reinterpret_cast<void*>(GetProcAddress(user32, "GetDpiForSystem")));
+            a.adjustWindowRectForDpi = reinterpret_cast<AdjustWindowRectExForDpiFn>(
+                reinterpret_cast<void*>(GetProcAddress(user32, "AdjustWindowRectExForDpi")));
+        }
+        HMODULE shcore = LoadLibraryA("shcore.dll");
+        if (shcore) {
+            a.setProcessDpiAwareness = reinterpret_cast<SetProcessDpiAwarenessFn>(
+                reinterpret_cast<void*>(GetProcAddress(shcore, "SetProcessDpiAwareness")));
+        }
+        return a;
+    }();
+    return api;
+}
+
+// Declare DPI awareness before any window exists (idempotent, harmless to call
+// repeatedly: Windows rejects later calls once a window exists, we ignore that).
+void enableDpiAwareness() {
+    static bool done = false;
+    if (done) return;
+    done = true;
+    const WinApi& api = winApi();
+    // Per-monitor V2 (Win10 1703+): crisp rendering + WM_DPICHANGED on moves.
+    if (api.setDpiAwarenessContext) {
+        constexpr INT_PTR kPerMonitorAwareV2 = -4;
+        if (api.setDpiAwarenessContext(reinterpret_cast<HANDLE>(kPerMonitorAwareV2))) return;
+    }
+    // Per-monitor awareness (Win8.1+).
+    if (api.setProcessDpiAwareness &&
+        api.setProcessDpiAwareness(2 /* PROCESS_PER_MONITOR_DPI_AWARE */) == 0 /* S_OK */)
+        return;
+    // System DPI awareness (Vista+): still removes the virtualization.
+    if (SetProcessDPIAware()) return;
+    fprintf(stderr, "[aw] DPI awareness unavailable — the OS may scale the window\n");
+}
+
 // Map a Win32 virtual-key code to the engine's keysym-style key code
 // (see input.hpp). Letters become lowercase ASCII; special keys use the same
 // 0x100+low-byte scheme as the X11 backend.
@@ -65,6 +156,16 @@ uint32_t vkToKey(WPARAM vk) {
 class PlatformWin32 final : public Platform {
 public:
     bool init(const char* title, int w, int h) override {
+        // Must happen before the first window is created; on a scaled display
+        // this is what keeps window sizes and mouse coordinates in real pixels.
+        enableDpiAwareness();
+
+        // Never create a window that is larger than the monitor can show.
+        int maxW = 0, maxH = 0;
+        if (maxWindowSize(maxW, maxH)) {
+            if (w > maxW) w = maxW;
+            if (h > maxH) h = maxH;
+        }
         width_ = w; height_ = h;
         mouseX_ = w / 2; mouseY_ = h / 2;
         hInstance_ = GetModuleHandleA(nullptr);
@@ -79,12 +180,15 @@ public:
         wc.style = CS_OWNDC;
         if (!RegisterClassA(&wc)) return false;
 
-        RECT r{0, 0, w, h};
-        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        // Outer size for the requested client area at the monitor's DPI, then
+        // centre it on the work area so it is fully visible from the start.
+        int fw = 0, fh = 0;
+        frameSize(systemDpi(), fw, fh);
+        int winW = w + fw, winH = h + fh;
+        int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+        centerOnPrimaryMonitor(winW, winH, x, y);
         hwnd_ = CreateWindowA("AgainstTheWallWindow", title, WS_OVERLAPPEDWINDOW,
-                              CW_USEDEFAULT, CW_USEDEFAULT,
-                              r.right - r.left, r.bottom - r.top,
-                              nullptr, nullptr, hInstance_, this);
+                              x, y, winW, winH, nullptr, nullptr, hInstance_, this);
         if (!hwnd_) return false;
 
         hdc_ = GetDC(hwnd_);
@@ -132,6 +236,10 @@ public:
 
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);
+        // Adopt the size Windows actually gave the client area (DPI rounding).
+        syncClientSize();
+        fprintf(stderr, "[aw] window: %dx%d client at %d,%d (dpi %d)\n",
+                width_, height_, x, y, windowDpi());
         fprintf(stderr, "[aw] renderer: %s | %s | GLSL %s\n",
                 gl.GetString ? (const char*)gl.GetString(GL_RENDERER) : "?",
                 gl.GetString ? (const char*)gl.GetString(GL_VERSION) : "?",
@@ -194,6 +302,16 @@ public:
             ClientToScreen(hwnd_, &pt);
             screenCX_ = pt.x; screenCY_ = pt.y;
             SetCursorPos(pt.x, pt.y);
+            // Adopt the position we actually got: if the OS clamped the warp,
+            // the per-frame look deltas below stay correct.
+            POINT cur{};
+            if (GetCursorPos(&cur)) {
+                POINT cp = cur;
+                if (ScreenToClient(hwnd_, &cp)) {
+                    screenCX_ = cur.x; screenCY_ = cur.y;
+                    centerX_ = cp.x; centerY_ = cp.y;
+                }
+            }
         } else {
             ShowCursor(TRUE);
             ReleaseCapture();
@@ -202,13 +320,31 @@ public:
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
+        if (fullscreen_) return;   // borderless fullscreen always fills the monitor
+        // Clamp to what the monitor can show: a windowed window must never be
+        // bigger than the screen (the resolution setting asks for a preset, the
+        // monitor decides how much of it fits).
+        int maxW = 0, maxH = 0;
+        if (maxWindowSize(maxW, maxH)) {
+            if (w > maxW) w = maxW;
+            if (h > maxH) h = maxH;
+        }
         width_ = w; height_ = h;
-        mouseX_ = w / 2; mouseY_ = h / 2;
-        if (!hwnd_) return;
-        RECT r{0, 0, w, h};
-        AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
-        SetWindowPos(hwnd_, nullptr, 0, 0, r.right - r.left, r.bottom - r.top,
-                     SWP_NOMOVE | SWP_NOZORDER);
+        if (!hwnd_) return;   // before init(): remembered for CreateWindow
+
+        int fw = 0, fh = 0;
+        frameSize(windowDpi(), fw, fh);
+        RECT wr{};
+        if (!GetWindowRect(hwnd_, &wr)) { wr.left = 0; wr.top = 0; }
+        RECT target{wr.left, wr.top, wr.left + w + fw, wr.top + h + fh};
+        clampWindowRect(target);
+        SetWindowPos(hwnd_, nullptr, target.left, target.top,
+                     target.right - target.left, target.bottom - target.top,
+                     SWP_NOZORDER | SWP_NOACTIVATE);
+        // Apply immediately so this frame already renders the new size (the
+        // asynchronous WM_SIZE confirms it afterwards).
+        syncClientSize();
+        keepCursorInside();
     }
 
     void setFullscreen(bool on) override {
@@ -220,23 +356,65 @@ public:
             GetWindowRect(hwnd_, &savedRect_);
             savedStyle_ = GetWindowLongA(hwnd_, GWL_STYLE);
             SetWindowLongA(hwnd_, GWL_STYLE, (savedStyle_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
-            HMONITOR mon = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
             MONITORINFO mi{};
             mi.cbSize = sizeof(mi);
-            if (GetMonitorInfoA(mon, &mi)) {
+            if (GetMonitorInfoA(monitor(), &mi)) {
                 SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                              mi.rcMonitor.right - mi.rcMonitor.left,
                              mi.rcMonitor.bottom - mi.rcMonitor.top,
                              SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
             }
+            syncClientSize();
         } else {
             SetWindowLongA(hwnd_, GWL_STYLE, savedStyle_);
-            SetWindowPos(hwnd_, nullptr, savedRect_.left, savedRect_.top,
-                         savedRect_.right - savedRect_.left,
-                         savedRect_.bottom - savedRect_.top,
+            RECT r = savedRect_;
+            if (r.right <= r.left || r.bottom <= r.top) {
+                RECT cur{};
+                if (GetWindowRect(hwnd_, &cur)) r = cur;
+            }
+            clampWindowRect(r);
+            SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
                          SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
             ShowWindow(hwnd_, SW_RESTORE);
+            syncClientSize();
         }
+    }
+
+    bool maxWindowSize(int& w, int& h) const override {
+        w = 0; h = 0;
+        // Also called before init() (to pick the first window size): make sure
+        // the monitor metrics below are not DPI-virtualized.
+        enableDpiAwareness();
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoA(monitor(), &mi)) return false;
+        int fw = 0, fh = 0;
+        frameSize(windowDpi(), fw, fh);
+        w = (mi.rcWork.right - mi.rcWork.left) - fw;
+        h = (mi.rcWork.bottom - mi.rcWork.top) - fh;
+        if (w < kMinWindowW) w = kMinWindowW;
+        if (h < kMinWindowH) h = kMinWindowH;
+        return true;
+    }
+
+    // Scaled displays: the menu must grow with the DPI (before this backend
+    // was DPI aware, Windows did that scaling for us — blurrily — and the
+    // fixed-pixel menu would now look half-size on a 200 % display).
+    float uiScale() const override {
+        return quantizeUiScale(float(windowDpi()) / 96.0f);
+    }
+
+    bool clientSize(int& w, int& h) const override {
+        if (hwnd_) {
+            RECT cr{};
+            if (GetClientRect(hwnd_, &cr) && cr.right > 0 && cr.bottom > 0) {
+                w = int(cr.right);
+                h = int(cr.bottom);
+                return true;
+            }
+        }
+        w = width_; h = height_;
+        return w > 0 && h > 0;
     }
 
     void* loadGLProc(const char* name) override {
@@ -259,6 +437,110 @@ private:
         int pf = ChoosePixelFormat(hdc_, &pfd);
         if (!pf) return false;
         return SetPixelFormat(hdc_, pf, &pfd) != FALSE;
+    }
+
+    // ---- DPI / monitor helpers ---------------------------------------------
+    // DPI of the window's monitor (or of the system, before the window exists).
+    int windowDpi() const {
+        const WinApi& api = winApi();
+        if (hwnd_ && api.getDpiForWindow) {
+            UINT d = api.getDpiForWindow(hwnd_);
+            if (d >= 48) return int(d);
+        }
+        return systemDpi();
+    }
+
+    int systemDpi() const {
+        const WinApi& api = winApi();
+        if (api.getDpiForSystem) {
+            UINT d = api.getDpiForSystem();
+            if (d >= 48) return int(d);
+        }
+        HDC dc = GetDC(nullptr);
+        int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSX) : 96;
+        if (dc) ReleaseDC(nullptr, dc);
+        return dpi >= 48 ? dpi : 96;
+    }
+
+    // Non-client (frame) size of a standard window at `dpi`, in pixels.
+    void frameSize(int dpi, int& fw, int& fh) const {
+        constexpr LONG kProbe = 200;
+        RECT r{0, 0, kProbe, kProbe};
+        const WinApi& api = winApi();
+        bool ok = api.adjustWindowRectForDpi &&
+                  api.adjustWindowRectForDpi(&r, WS_OVERLAPPEDWINDOW, FALSE, 0, UINT(dpi)) != FALSE;
+        if (!ok) {
+            r = RECT{0, 0, kProbe, kProbe};
+            AdjustWindowRect(&r, WS_OVERLAPPEDWINDOW, FALSE);
+        }
+        fw = int((r.right - r.left) - kProbe);
+        fh = int((r.bottom - r.top) - kProbe);
+        if (fw < 0) fw = 0;
+        if (fh < 0) fh = 0;
+    }
+
+    HMONITOR monitor() const {
+        if (hwnd_) return MonitorFromWindow(hwnd_, MONITOR_DEFAULTTONEAREST);
+        POINT origin{0, 0};
+        return MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+    }
+
+    // Centre a window of `winW x winH` on the primary monitor's work area.
+    void centerOnPrimaryMonitor(int winW, int winH, int& x, int& y) const {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        POINT origin{0, 0};
+        HMONITOR mon = MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
+        if (!mon || !GetMonitorInfoA(mon, &mi)) { x = CW_USEDEFAULT; y = CW_USEDEFAULT; return; }
+        const RECT& wa = mi.rcWork;
+        int availW = wa.right - wa.left, availH = wa.bottom - wa.top;
+        x = wa.left + (availW - winW) / 2;
+        y = wa.top + (availH - winH) / 2;
+        if (x + winW > wa.right) x = wa.right - winW;
+        if (y + winH > wa.bottom) y = wa.bottom - winH;
+        if (x < wa.left) x = wa.left;
+        if (y < wa.top) y = wa.top;
+    }
+
+    // Shrink/move a window rect so that it stays inside the work area.
+    void clampWindowRect(RECT& wr) const {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoA(monitor(), &mi)) return;
+        const RECT& wa = mi.rcWork;
+        int w = int(wr.right - wr.left), h = int(wr.bottom - wr.top);
+        int availW = wa.right - wa.left, availH = wa.bottom - wa.top;
+        if (w > availW) { w = availW; wr.left = wa.left; }
+        if (h > availH) { h = availH; wr.top = wa.top; }
+        if (wr.left + w > wa.right) wr.left = wa.right - w;
+        if (wr.top + h > wa.bottom) wr.top = wa.bottom - h;
+        if (wr.left < wa.left) wr.left = wa.left;
+        if (wr.top < wa.top) wr.top = wa.top;
+        wr.right = wr.left + w;
+        wr.bottom = wr.top + h;
+    }
+
+    void syncClientSize() {
+        RECT cr{};
+        if (hwnd_ && GetClientRect(hwnd_, &cr) && cr.right > 0 && cr.bottom > 0) {
+            width_ = int(cr.right);
+            height_ = int(cr.bottom);
+        }
+    }
+
+    // After a resize the cursor can end up outside the smaller window (it would
+    // then click on whatever is behind it): bring it back into the client area.
+    void keepCursorInside() {
+        if (!hwnd_ || captured_ || width_ <= 0 || height_ <= 0) return;
+        POINT p{};
+        if (!GetCursorPos(&p)) return;
+        POINT c = p;
+        if (!ScreenToClient(hwnd_, &c)) return;
+        if (c.x >= 0 && c.y >= 0 && c.x < width_ && c.y < height_) return;
+        c.x = width_ / 2; c.y = height_ / 2;
+        if (!ClientToScreen(hwnd_, &c)) return;
+        SetCursorPos(c.x, c.y);
+        mouseX_ = width_ / 2; mouseY_ = height_ / 2;
     }
 
     static LRESULT CALLBACK wndProcThunk(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -296,6 +578,32 @@ private:
             case WM_SIZE:
                 width_ = LOWORD(lp);
                 height_ = HIWORD(lp);
+                return 0;
+            case WM_DPICHANGED: {
+                // Per-monitor DPI awareness: adopt the size Windows suggests for
+                // the new scale factor (windowed mode only; borderless
+                // fullscreen covers the monitor either way).
+                if (!fullscreen_) {
+                    const RECT* sug = reinterpret_cast<const RECT*>(lp);
+                    if (sug && sug->right > sug->left && sug->bottom > sug->top) {
+                        RECT r = *sug;
+                        clampWindowRect(r);
+                        SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left,
+                                     r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+                        syncClientSize();
+                    }
+                }
+                return 0;
+            }
+            case WM_DISPLAYCHANGE:
+                // Monitor layout/resolution changed (undocked laptop, scaled
+                // display, taskbar resized): keep the window fully on screen.
+                // A maximized window is Windows' own business — it re-fits it —
+                // and un-maximizing it here would be a rude surprise.
+                if (!fullscreen_) {
+                    if (!IsZoomed(hwnd_) && width_ > 0 && height_ > 0) resize(width_, height_);
+                    else syncClientSize();
+                }
                 return 0;
             case WM_CLOSE:
                 shouldQuit_ = true;

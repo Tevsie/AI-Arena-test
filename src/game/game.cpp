@@ -27,7 +27,11 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
 
     if (!preferHeadless) {
         platform_ = createPlatform();
-        if (platform_->init(title, width, height)) goto platformReady;
+        // Pick a window size the monitor can actually show *before* the window
+        // is created, so a saved "2560x1440" never opens a window larger than
+        // the screen (even for a moment).
+        fitWindowToMonitor();
+        if (platform_->init(title, settings_.width, settings_.height)) goto platformReady;
         // No usable display/GPU: fall back to the headless backend.
         platform_->shutdown();
         delete platform_;
@@ -39,7 +43,13 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
         return false;
     }
 platformReady:;
-    if (settings_.fullscreen) platform_->setFullscreen(true);
+    if (settings_.fullscreen) {
+        platform_->setFullscreen(true);
+    } else {
+        // The window may have opened on a different monitor than the primary
+        // one: fit (and resize) again now that the backend knows its display.
+        fitWindowToMonitor();
+    }
 
     float platformTop = seedWorld();
     player_.reset(48.0f, platformTop + 0.1f, 0.5f);
@@ -62,6 +72,19 @@ platformReady:;
     lastTime_ = nowSeconds();
     initialized_ = true;
     return true;
+}
+
+// Snap the requested window size onto a size the monitor can actually show and
+// apply it. Windowed mode only (borderless fullscreen always covers the
+// monitor); a no-op when the backend cannot report a monitor (headless).
+void Game::fitWindowToMonitor() {
+    if (!platform_ || settings_.fullscreen) return;
+    int availW = 0, availH = 0;
+    if (!platform_->maxWindowSize(availW, availH)) return;
+    int w = settings_.width, h = settings_.height;
+    settings_.fitToMonitor(availW, availH);
+    if (settings_.width != w || settings_.height != h)
+        platform_->resize(settings_.width, settings_.height);
 }
 
 float Game::seedWorld() {
@@ -161,6 +184,11 @@ void Game::run() {
 
         if (menuOpen_) {
             menu_.update(in, settings_, audio_, *platform_);
+            // The menu can resize the window (resolution setting): pick the new
+            // client size up right away so this frame renders the size the
+            // window actually has.
+            int cw = 0, ch = 0;
+            if (platform_->clientSize(cw, ch)) { in.width = cw; in.height = ch; }
             if (menu_.consumeRestart()) {
                 restart();
                 menuOpen_ = false;
@@ -190,12 +218,13 @@ void Game::run() {
         if (!headless()) {
             float aspect = in.width > 0 && in.height > 0 ? float(in.width) / float(in.height)
                                                          : 16.0f / 9.0f;
-            Mat4 proj = Mat4::perspective(deg2rad(FOV_DEG), aspect, NEAR_PLANE, FAR_PLANE);
+            float fov = settings_.fov;
+            Mat4 proj = Mat4::perspective(deg2rad(fov), aspect, NEAR_PLANE, FAR_PLANE);
             Vec3 eye = player_.eye();
             Mat4 view = Mat4::lookAt(eye, eye + player_.forward(), {0, 1, 0});
             Mat4 vp = proj * view;
-            stats_.drawnInstances =
-                renderer_.render(wall_, player_, vp, aspect, in.width, in.height, target_.hit);
+            stats_.drawnInstances = renderer_.render(wall_, player_, vp, aspect, in.width,
+                                                     in.height, fov, target_.hit);
             if (menuOpen_) {
                 renderer_.uiBegin(in.width, in.height);
                 menu_.render(renderer_);

@@ -59,7 +59,8 @@ public:
 
 private:
     void demoDrive(float dt);
-    float seedWorld();   // (re)builds the starting platform; returns its top
+    float seedWorld();        // (re)builds the starting platform; returns its top
+    void fitWindowToMonitor(); // clamp the windowed size to the monitor
 
     Platform* platform_ = nullptr;
     Wall wall_;

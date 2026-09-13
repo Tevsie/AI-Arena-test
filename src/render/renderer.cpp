@@ -349,7 +349,7 @@ void Renderer::shutdown() {
 }
 
 int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewProj,
-                     float aspect, int width, int height, bool targetHot) {
+                     float aspect, int width, int height, float fovDeg, bool targetHot) {
     if (!ready_) return 0;
 
     // ---- frame setup (viewport + clear every frame) -------------------------
@@ -421,7 +421,9 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     Vec3 fwd = player.forward();
     Vec3 right = normalize(cross(fwd, Vec3{0, 1, 0}));
     Vec3 up = cross(right, fwd);
-    float tanHalf = std::tan(deg2rad(FOV_DEG) * 0.5f);
+    // Match the projection exactly: the sky is a full-screen pass that
+    // reconstructs view rays from the half-FOV tangents.
+    float tanHalf = std::tan(deg2rad(fovDeg) * 0.5f);
     gl.Uniform3f(skyForward_, fwd.x, fwd.y, fwd.z);
     gl.Uniform3f(skyRight_, right.x, right.y, right.z);
     gl.Uniform3f(skyUp_, up.x, up.y, up.z);
