@@ -31,7 +31,7 @@ code is pushed.
 > `atw.exe` is fully self-contained (x64, no install). It needs a standard
 > Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
 > AMD driver). If SmartScreen warns on first run, click **More info →
-> Run anyway**. Press `Esc` for the settings menu (volume, resolution, fullscreen,
+> Run anyway**. Press `Esc` for the settings menu (volume, display mode, resolution,
 > sensitivity, restart, quit).
 
 ### Build the .exe yourself on Windows (optional)
@@ -101,12 +101,28 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 | Setting              | What it does                                              |
 |----------------------|-----------------------------------------------------------|
 | Master volume bar    | 0–100 % loudness for all procedural sound effects         |
-| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440 (only the sizes your monitor can show, plus a `MAX` entry = the largest window that fits the screen) |
+| Display mode         | `WINDOWED` / `BORDERLESS` / `EXCLUSIVE` fullscreen        |
+| Resolution           | Depends on the mode — see *Display modes* below           |
+| Refresh rate         | Exclusive fullscreen only: the rates your driver reports  |
 | Field of view        | Vertical FOV, 55–110° (default 75°)                       |
 | Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
-| Fullscreen           | Borderless fullscreen toggle (`ON` / `OFF`)               |
 | **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
 | Resume / Quit        | Close the menu / exit the game                            |
+
+### Display modes
+
+| Mode           | Window                                | Resolution row                                    |
+|----------------|---------------------------------------|---------------------------------------------------|
+| `WINDOWED`     | Real window with borders, client area = the selected size, re-centred on the monitor | Window **client size**: 1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160 — but only the sizes your screen can show, plus `MAX` (largest window that fits) |
+| `BORDERLESS`   | Borderless window covering the whole monitor at its native resolution (no mode switch, instant `Alt+Tab`) | **Render resolution**: the 3D scene is drawn at this size and upscaled to the window; the UI, menu and crosshair always render at native window resolution, so text stays crisp. The chosen preset keeps its pixel budget but takes the monitor's shape, so upscaling never stretches the image |
+| `EXCLUSIVE`    | Driver mode switch (`ChangeDisplaySettingsEx` / XRandR): real hardware resolution + refresh rate | Strictly the modes your driver reports for this display (lowest → highest) |
+
+Every apply is **confirmed before it sticks**: a modal asks *"Keep these display
+settings? Reverting in 15 s"* — `Enter`/`Space`/click **KEEP** saves it to
+`settings.cfg`; `Esc`, the timeout, or **REVERT** instantly restore the last
+confirmed configuration (a restored exclusive mode at startup is provisional
+too), so a mode your monitor cannot show can never leave you with a black
+screen.
 
 Windowed mode always fits your monitor: the requested size is clamped to the
 work area (screen minus taskbar and window decorations), sizes that cannot be
@@ -171,7 +187,8 @@ src/
                  font.hpp (embedded 5x7 menu font)
   game/          constants, grid/chunk/wall (streaming + brick store),
                  player (kinematic controller), interaction (raycast pull/push),
-                 settings (volume/resolution/sensitivity/fullscreen + persistence),
+                 settings (display modes + render scaling, FOV, sensitivity,
+                 persistence), display_confirm (15 s keep-or-revert modal),
                  menu (pause/settings overlay), game.cpp (loop + demo driver)
   audio/         procedural SFX mixer + synth, WinMM / PulseAudio / ALSA backends
 tests/           dependency-free unit tests (grid, store, streaming,

@@ -37,6 +37,64 @@ using GLXPixmap = unsigned long;
 
 struct XColor { unsigned long pixel; unsigned short red, green, blue; char flags; char pad; };
 
+// ---- XRandR (hand-declared ABI; libXrandr.so.2 is dlopen'd at runtime) ----
+using RROutput = unsigned long;
+using RRCrtc = unsigned long;
+using RRMode = unsigned long;
+using Rotation = unsigned short;
+
+struct XRRModeInfo {
+    RRMode id;
+    unsigned int width, height;
+    unsigned long dotClock;
+    unsigned int hSyncStart, hSyncEnd, hTotal, hSkew;
+    unsigned int vSyncStart, vSyncEnd, vTotal;
+    char* name;
+    unsigned int nameLength;
+    unsigned long modeFlags;
+};
+
+struct XRRScreenResources {
+    unsigned long timestamp;
+    unsigned long configTimestamp;
+    int ncrtc;
+    RRCrtc* crtcs;
+    int noutput;
+    RROutput* outputs;
+    int nmode;
+    XRRModeInfo* modes;
+};
+
+struct XRRCrtcInfo {
+    unsigned long timestamp;
+    int x, y;
+    unsigned int width, height;
+    RRMode mode;
+    Rotation rotation;
+    int noutput;
+    RROutput* outputs;
+    Rotation rotations;
+    int npossible;
+    RROutput* possible;
+};
+
+struct XRROutputInfo {
+    unsigned long timestamp;
+    RRCrtc crtc;
+    char* name;
+    int nameLen;
+    unsigned long mmWidth, mmHeight;
+    int connection, subpixelOrder;
+    int npreferred;
+    int ncrtc;
+    RRCrtc* crtcs;
+    int nclone;
+    RROutput* clones;
+    int nmode;
+    int npreferredmode;
+    RRMode* modes;
+};
+
 extern "C" {
 using XOpenDisplayFn = Display* (*)(const char*);
 using XDefaultScreenFn = int (*)(Display*);
@@ -53,8 +111,18 @@ using XLookupKeysymFn = KeySym (*)(void*, int);
 using XKeysymToKeycodeFn = unsigned (*)(Display*, KeySym);
 using XWarpPointerFn = int (*)(Display*, Window, Window, int, int, unsigned, unsigned, int, int);
 using XResizeWindowFn = int (*)(Display*, Window, unsigned, unsigned);
+using XMoveWindowFn = int (*)(Display*, Window, int, int);
 using XDisplayWidthFn = int (*)(Display*, int);
 using XDisplayHeightFn = int (*)(Display*, int);
+using XRRGetScreenResourcesCurrentFn = XRRScreenResources* (*)(Display*, Window);
+using XRRFreeScreenResourcesFn = void (*)(XRRScreenResources*);
+using XRRGetCrtcInfoFn = XRRCrtcInfo* (*)(Display*, XRRScreenResources*, RRCrtc);
+using XRRFreeCrtcInfoFn = void (*)(XRRCrtcInfo*);
+using XRRGetOutputInfoFn = XRROutputInfo* (*)(Display*, XRRScreenResources*, RROutput);
+using XRRFreeOutputInfoFn = void (*)(XRROutputInfo*);
+using XRRGetOutputPrimaryFn = RROutput (*)(Display*, Window);
+using XRRSetCrtcConfigFn = int (*)(Display*, XRRScreenResources*, RRCrtc, Time, int, int,
+                                   RRMode, Rotation, RROutput*, int);
 using XSendEventFn = int (*)(Display*, Window, int, long, XEvent*);
 using XQueryPointerFn = int (*)(Display*, Window, Window*, Window*, int*, int*, int*, int*, unsigned*);
 using XGrabPointerFn = int (*)(Display*, Window, int, unsigned, int, int, Window, Cursor, Time);
@@ -142,6 +210,7 @@ struct XLib {
     x11::XKeysymToKeycodeFn XKeysymToKeycode = nullptr;
     x11::XWarpPointerFn XWarpPointer = nullptr;
     x11::XResizeWindowFn XResizeWindow = nullptr;
+    x11::XMoveWindowFn XMoveWindow = nullptr;
     x11::XDisplayWidthFn XDisplayWidth = nullptr;
     x11::XDisplayHeightFn XDisplayHeight = nullptr;
     x11::XSendEventFn XSendEvent = nullptr;
@@ -160,6 +229,22 @@ struct XLib {
     x11::XSetWMProtocolsFn XSetWMProtocols = nullptr;
     x11::XChangePropertyFn XChangeProperty = nullptr;
     x11::XFreeFn XFree = nullptr;
+
+    // XRandR (optional: exclusive fullscreen / display-mode enumeration)
+    void* hRandR = nullptr;
+    x11::XRRGetScreenResourcesCurrentFn XRRGetScreenResourcesCurrent = nullptr;
+    x11::XRRFreeScreenResourcesFn XRRFreeScreenResources = nullptr;
+    x11::XRRGetCrtcInfoFn XRRGetCrtcInfo = nullptr;
+    x11::XRRFreeCrtcInfoFn XRRFreeCrtcInfo = nullptr;
+    x11::XRRGetOutputInfoFn XRRGetOutputInfo = nullptr;
+    x11::XRRFreeOutputInfoFn XRRFreeOutputInfo = nullptr;
+    x11::XRRGetOutputPrimaryFn XRRGetOutputPrimary = nullptr;
+    x11::XRRSetCrtcConfigFn XRRSetCrtcConfig = nullptr;
+
+    bool hasRandR() const {
+        return XRRGetScreenResourcesCurrent && XRRFreeScreenResources && XRRGetCrtcInfo &&
+               XRRFreeCrtcInfo && XRRSetCrtcConfig;
+    }
 
     glx::glXChooseFBConfigFn glXChooseFBConfig = nullptr;
     glx::glXCreateContextAttribsARBFn glXCreateContextAttribsARB = nullptr;
@@ -188,6 +273,7 @@ struct XLib {
         LD(hX11, XKeysymToKeycode, "XKeysymToKeycode");
         LD(hX11, XWarpPointer, "XWarpPointer");
         LD(hX11, XResizeWindow, "XResizeWindow");
+        LD(hX11, XMoveWindow, "XMoveWindow");
         LD(hX11, XDisplayWidth, "XDisplayWidth");
         LD(hX11, XDisplayHeight, "XDisplayHeight");
         LD(hX11, XSendEvent, "XSendEvent");
@@ -218,6 +304,21 @@ struct XLib {
             LD2(hGL, glXGetProcAddress, "glXGetProcAddress");
             LD2(hGL, glXDestroyContext, "glXDestroyContext");
 #undef LD2
+        }
+        // XRandR (optional): without it the game falls back to borderless
+        // fullscreen and only offers render resolutions.
+        hRandR = dlopen("libXrandr.so.2", RTLD_LAZY | RTLD_GLOBAL);
+        if (hRandR) {
+#define LD3(field, sym) field = reinterpret_cast<decltype(field)>(dlsym(hRandR, sym));
+            LD3(XRRGetScreenResourcesCurrent, "XRRGetScreenResourcesCurrent");
+            LD3(XRRFreeScreenResources, "XRRFreeScreenResources");
+            LD3(XRRGetCrtcInfo, "XRRGetCrtcInfo");
+            LD3(XRRFreeCrtcInfo, "XRRFreeCrtcInfo");
+            LD3(XRRGetOutputInfo, "XRRGetOutputInfo");
+            LD3(XRRFreeOutputInfo, "XRRFreeOutputInfo");
+            LD3(XRRGetOutputPrimary, "XRRGetOutputPrimary");
+            LD3(XRRSetCrtcConfig, "XRRSetCrtcConfig");
+#undef LD3
         }
         // glXGetProcAddress may live in libGLX.so.1 on some setups; tolerate its absence
         // only if the core GLX symbols resolved.
@@ -327,6 +428,9 @@ public:
             fprintf(stderr, "[aw] failed to load OpenGL 3.3 core symbols\n");
             return false;
         }
+        refreshMonitorInfo();
+        fprintf(stderr, "[aw] window: %dx%d client, desktop %dx%d, xrandr %s\n",
+                width_, height_, desktopW_, desktopH_, x_.hasRandR() ? "yes" : "no");
         fprintf(stderr, "[aw] renderer: %s | %s\n",
                 gl.GetString ? (const char*)gl.GetString(GL_RENDERER) : "?",
                 gl.GetString ? (const char*)gl.GetString(GL_VERSION) : "?");
@@ -426,6 +530,7 @@ public:
             if (x_.XCloseDisplay) x_.XCloseDisplay(dpy_);
         }
         dpy_ = nullptr; ctx_ = nullptr;
+        if (x_.hRandR) { dlclose(x_.hRandR); x_.hRandR = nullptr; }
         if (x_.hGL) { dlclose(x_.hGL); x_.hGL = nullptr; }
         if (x_.hX11) { dlclose(x_.hX11); x_.hX11 = nullptr; }
     }
@@ -479,9 +584,13 @@ public:
         // Apply immediately so the next frame already uses the new size (the
         // async ConfigureNotify confirms it afterwards).
         width_ = w; height_ = h;
+        pendingW_ = w; pendingH_ = h;
         mouseX_ = w / 2; mouseY_ = h / 2;
         if (dpy_ && x_.XResizeWindow) {
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
+            // Re-center on the (active) screen.
+            if (mode_ == DisplayMode::Windowed && x_.XMoveWindow)
+                x_.XMoveWindow(dpy_, win_, (desktopW_ - w) / 2, (desktopH_ - h) / 2);
             if (x_.XSync) x_.XSync(dpy_, 0);
         }
     }
@@ -507,9 +616,87 @@ public:
         return w > 0 && h > 0;
     }
 
-    void setFullscreen(bool on) override {
-        if (!dpy_ || !x_.XSendEvent || !x_.XInternAtom) return;
-        // EWMH fullscreen: a _NET_WM_STATE client message to the root window.
+    // ---- display modes -----------------------------------------------------
+    bool applyDisplayMode(DisplayMode mode, int w, int h, int refreshHz) override {
+        pendingMode_ = mode;
+        if (!dpy_) return true;
+        switch (mode) {
+            case DisplayMode::Windowed: {
+                restoreDesktopMode();
+                setFullscreenHint(false);
+                mode_ = DisplayMode::Windowed;
+                refreshMonitorInfo();
+                resize(w > 0 ? w : (width_ > 0 ? width_ : pendingW_),
+                       h > 0 ? h : (height_ > 0 ? height_ : pendingH_));
+                return true;
+            }
+            case DisplayMode::Borderless: {
+                restoreDesktopMode();
+                mode_ = DisplayMode::Borderless;
+                refreshMonitorInfo();
+                setFullscreenHint(true);
+                fillScreenRect();
+                return true;
+            }
+            case DisplayMode::Exclusive:
+            default: {
+                if (!x_.hasRandR()) {
+                    fprintf(stderr, "[aw] XRandR unavailable - no exclusive fullscreen\n");
+                    return false;
+                }
+                if (!switchDisplayMode(w, h, refreshHz)) {
+                    restoreDesktopMode();
+                    return false;
+                }
+                mode_ = DisplayMode::Exclusive;
+                desktopW_ = w; desktopH_ = h;   // coherent while we are switched
+                setFullscreenHint(true);
+                fillScreenRect();
+                return true;
+            }
+        }
+    }
+
+    DisplayMode currentDisplayMode() const override { return mode_; }
+
+    bool monitorSize(int& w, int& h) const override {
+        w = desktopW_; h = desktopH_;
+        return w > 0 && h > 0;
+    }
+
+    int displayModeCount() const override { return enumerateModes(); }
+
+    bool displayModeAt(int index, DisplayModeInfo& out) const override {
+        int n = enumerateModes();
+        if (index < 0 || index >= n) return false;
+        out = modeCache_[index];
+        return true;
+    }
+
+    void* loadGLProc(const char* name) override {
+        void* p = nullptr;
+        if (x_.glXGetProcAddress) p = x_.glXGetProcAddress(reinterpret_cast<const unsigned char*>(name));
+        if (!p && x_.hGL) p = dlsym(x_.hGL, name);
+        return p;
+    }
+
+private:
+    // ---- display-mode helpers ----------------------------------------------
+    void refreshMonitorInfo() {
+        if (mode_ == DisplayMode::Exclusive) return;   // keep the desktop cache
+        if (!dpy_ || !x_.XDisplayWidth || !x_.XDisplayHeight) return;
+        int screen = x_.XDefaultScreen(dpy_);
+        int sw = x_.XDisplayWidth(dpy_, screen);
+        int sh = x_.XDisplayHeight(dpy_, screen);
+        if (sw > 0 && sh > 0) { desktopW_ = sw; desktopH_ = sh; }
+        modeCacheCount_ = -1;
+    }
+
+    // EWMH fullscreen (borderless / exclusive both cover the whole screen; the
+    // difference is whether the display mode itself was switched).
+    void setFullscreenHint(bool on) {
+        if (fullscreenHint_ == on) return;
+        if (!x_.XSendEvent || !x_.XInternAtom) return;
         x11::Atom wmState = x_.XInternAtom(dpy_, "_NET_WM_STATE", 0);
         x11::Atom fs = x_.XInternAtom(dpy_, "_NET_WM_STATE_FULLSCREEN", 0);
         if (!wmState || !fs) return;
@@ -527,18 +714,158 @@ public:
         x11::Window root = x_.XRootWindow(dpy_, screen);
         constexpr long kSubstructure = (1L << 20) | (1L << 21);  // Redirect|Notify
         x_.XSendEvent(dpy_, root, 0, kSubstructure, reinterpret_cast<x11::XEvent*>(&msg));
+        int sw = desktopW_, sh = desktopH_;
+        if (on && x_.XResizeWindow && sw > 0 && sh > 0)
+            x_.XResizeWindow(dpy_, win_, (unsigned)sw, (unsigned)sh);
         if (x_.XSync) x_.XSync(dpy_, 0);
-        // The window manager resizes the window; ConfigureNotify syncs width_/height_.
+        fullscreenHint_ = on;
     }
 
-    void* loadGLProc(const char* name) override {
-        void* p = nullptr;
-        if (x_.glXGetProcAddress) p = x_.glXGetProcAddress(reinterpret_cast<const unsigned char*>(name));
-        if (!p && x_.hGL) p = dlsym(x_.hGL, name);
-        return p;
+    void fillScreenRect() {
+        if (x_.XResizeWindow && desktopW_ > 0 && desktopH_ > 0)
+            x_.XResizeWindow(dpy_, win_, (unsigned)desktopW_, (unsigned)desktopH_);
+        if (x_.XMoveWindow) x_.XMoveWindow(dpy_, win_, 0, 0);
+        if (x_.XSync) x_.XSync(dpy_, 0);
+        width_ = desktopW_ > 0 ? desktopW_ : width_;
+        height_ = desktopH_ > 0 ? desktopH_ : height_;
     }
 
-private:
+    // Display modes the driver reports through XRandR (deduplicated, cached).
+    int enumerateModes() const {
+        if (modeCacheCount_ >= 0) return modeCacheCount_;
+        modeCacheCount_ = 0;
+        if (!dpy_ || !x_.hasRandR()) return modeCacheCount_;
+        int screen = x_.XDefaultScreen(dpy_);
+        x11::Window root = x_.XRootWindow(dpy_, screen);
+        x11::XRRScreenResources* res = x_.XRRGetScreenResourcesCurrent(dpy_, root);
+        if (!res) return modeCacheCount_;
+        for (int i = 0; i < res->nmode && modeCacheCount_ < kMaxDriverModes; ++i) {
+            const x11::XRRModeInfo& m = res->modes[i];
+            if (m.width < kMinModeW || m.height < kMinModeH) continue;
+            if (m.hTotal == 0 || m.vTotal == 0) continue;
+            double hz = double(m.dotClock) / (double(m.hTotal) * double(m.vTotal));
+            DisplayModeInfo info;
+            info.width = int(m.width);
+            info.height = int(m.height);
+            info.refreshHz = int(hz + 0.5);
+            bool dup = false;
+            for (int j = 0; j < modeCacheCount_; ++j) {
+                if (modeCache_[j].width == info.width && modeCache_[j].height == info.height &&
+                    modeCache_[j].refreshHz == info.refreshHz) { dup = true; break; }
+            }
+            if (dup) continue;
+            modeCache_[modeCacheCount_++] = info;
+        }
+        x_.XRRFreeScreenResources(res);
+        // Ascending by area, then refresh rate.
+        for (int i = 1; i < modeCacheCount_; ++i) {
+            DisplayModeInfo key = modeCache_[i];
+            int j = i - 1;
+            while (j >= 0 && (modeCache_[j].width * modeCache_[j].height > key.width * key.height ||
+                              (modeCache_[j].width * modeCache_[j].height == key.width * key.height &&
+                               modeCache_[j].refreshHz > key.refreshHz))) {
+                modeCache_[j + 1] = modeCache_[j];
+                --j;
+            }
+            modeCache_[j + 1] = key;
+        }
+        return modeCacheCount_;
+    }
+
+    // The crtc driving the primary output (falls back to the first one).
+    x11::RRCrtc primaryCrtc(x11::XRRScreenResources* res, x11::Window root) const {
+        x11::RROutput out = x_.XRRGetOutputPrimary ? x_.XRRGetOutputPrimary(dpy_, root) : 0;
+        if (out && x_.XRRGetOutputInfo && x_.XRRFreeOutputInfo) {
+            x11::XRROutputInfo* oi = x_.XRRGetOutputInfo(dpy_, res, out);
+            if (oi) {
+                x11::RRCrtc crtc = oi->crtc;
+                x_.XRRFreeOutputInfo(oi);
+                if (crtc) return crtc;
+            }
+        }
+        return res->ncrtc > 0 ? res->crtcs[0] : 0;
+    }
+
+    bool switchDisplayMode(int w, int h, int refreshHz) {
+        int screen = x_.XDefaultScreen(dpy_);
+        x11::Window root = x_.XRootWindow(dpy_, screen);
+        x11::XRRScreenResources* res = x_.XRRGetScreenResourcesCurrent(dpy_, root);
+        if (!res) return false;
+        x11::RRCrtc crtc = primaryCrtc(res, root);
+        if (!crtc) { x_.XRRFreeScreenResources(res); return false; }
+        x11::XRRCrtcInfo* ci = x_.XRRGetCrtcInfo(dpy_, res, crtc);
+        if (!ci) { x_.XRRFreeScreenResources(res); return false; }
+
+        // Remember the desktop configuration once, for restoreDesktopMode().
+        if (!modeSaved_) {
+            savedCrtc_ = crtc;
+            savedMode_ = ci->mode;
+            savedRotation_ = ci->rotation;
+            savedX_ = ci->x;
+            savedY_ = ci->y;
+            // The outputs attached to the crtc have to be handed back to
+            // XRRSetCrtcConfig when restoring: passing none would switch the
+            // display off instead of restoring the desktop.
+            savedOutput_ = (ci->noutput > 0 && ci->outputs) ? ci->outputs[0] : 0;
+            modeSaved_ = true;
+        }
+
+        // Pick the requested mode (closest refresh when 0 = default).
+        x11::RRMode pick = 0;
+        int bestHz = -1;
+        for (int i = 0; i < res->nmode; ++i) {
+            const x11::XRRModeInfo& m = res->modes[i];
+            if (int(m.width) != w || int(m.height) != h) continue;
+            int hz = (m.hTotal && m.vTotal)
+                         ? int(double(m.dotClock) / (double(m.hTotal) * double(m.vTotal)) + 0.5)
+                         : 0;
+            if (refreshHz > 0 && hz != refreshHz) continue;
+            if (hz <= bestHz) continue;
+            bestHz = hz;
+            pick = m.id;
+        }
+        if (!pick) {
+            x_.XRRFreeCrtcInfo(ci);
+            x_.XRRFreeScreenResources(res);
+            fprintf(stderr, "[aw] XRandR has no mode %dx%d@%d\n", w, h, refreshHz);
+            return false;
+        }
+        x11::RROutput outputs[1] = {0};
+        int noutputs = 0;
+        if (ci->noutput > 0 && ci->outputs) { outputs[0] = ci->outputs[0]; noutputs = 1; }
+        int ok = x_.XRRSetCrtcConfig(dpy_, res, crtc, 0 /*CurrentTime*/, ci->x, ci->y,
+                                     pick, ci->rotation, outputs, noutputs);
+        x_.XRRFreeCrtcInfo(ci);
+        x_.XRRFreeScreenResources(res);
+        if (ok != 0 /* Success */) {
+            fprintf(stderr, "[aw] XRRSetCrtcConfig failed\n");
+            return false;
+        }
+        if (x_.XSync) x_.XSync(dpy_, 0);
+        modeCacheCount_ = -1;
+        return true;
+    }
+
+    void restoreDesktopMode() {
+        if (mode_ != DisplayMode::Exclusive || !modeSaved_ || !dpy_ || !x_.hasRandR()) {
+            if (mode_ == DisplayMode::Exclusive) mode_ = DisplayMode::Windowed;
+            return;
+        }
+        int screen = x_.XDefaultScreen(dpy_);
+        x11::Window root = x_.XRootWindow(dpy_, screen);
+        x11::XRRScreenResources* res = x_.XRRGetScreenResourcesCurrent(dpy_, root);
+        if (res) {
+            x11::RROutput outputs[1] = {savedOutput_};
+            x_.XRRSetCrtcConfig(dpy_, res, savedCrtc_, 0, savedX_, savedY_, savedMode_,
+                                savedRotation_, outputs, savedOutput_ ? 1 : 0);
+            x_.XRRFreeScreenResources(res);
+            if (x_.XSync) x_.XSync(dpy_, 0);
+        }
+        mode_ = DisplayMode::Windowed;   // the caller re-applies the real one
+        modeCacheCount_ = -1;
+        refreshMonitorInfo();
+    }
+
     XLib x_;
     x11::Display* dpy_ = nullptr;
     x11::Window win_ = 0;
@@ -549,6 +876,22 @@ private:
     int warpX_ = 0, warpY_ = 0;
     int mouseX_ = 0, mouseY_ = 0;
     bool captured_ = false;
+    // Display state.
+    static constexpr int kMaxDriverModes = 256;
+    static constexpr int kMinModeW = 640, kMinModeH = 400;
+    DisplayMode mode_ = DisplayMode::Windowed;
+    DisplayMode pendingMode_ = DisplayMode::Windowed;
+    int pendingW_ = 1280, pendingH_ = 720;
+    bool fullscreenHint_ = false;
+    int desktopW_ = 0, desktopH_ = 0;
+    bool modeSaved_ = false;
+    x11::RRCrtc savedCrtc_ = 0;
+    x11::RRMode savedMode_ = 0;
+    x11::Rotation savedRotation_ = 1;   // RR_Rotate_0
+    int savedX_ = 0, savedY_ = 0;
+    x11::RROutput savedOutput_ = 0;     // output to re-attach when restoring
+    mutable DisplayModeInfo modeCache_[kMaxDriverModes]{};
+    mutable int modeCacheCount_ = -1;
 };
 
 Platform* createPlatform() { return new PlatformX11(); }

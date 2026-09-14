@@ -93,17 +93,41 @@ fully testable and benchmarkable on machines without a display or GPU.
 
 ## Settings, menu & audio
 
-- `Esc` pauses the game and opens the settings overlay (volume bar, resolution
-  picker, field-of-view bar, sensitivity bar, fullscreen toggle, Restart /
-  Resume / Quit). The menu is driven by
+- `Esc` pauses the game and opens the settings overlay (volume bar, display
+  mode, resolution picker, refresh rate, field-of-view bar, sensitivity bar,
+  Restart / Resume / Quit). The menu is driven by
   mouse (hover + click + slider drag; backends report absolute cursor position)
   and keyboard (arrows + Enter), drawn with the renderer's immediate-mode UI
   pass (colored rects + an embedded 5x7 bitmap font atlas — no font files).
-- Window sizes are monitor aware (`Platform::maxWindowSize`): the resolution
-  picker only offers presets the display can actually show plus a `MAX` entry
-  for the largest window that fits the work area, and `Platform::resize`
-  clamps every request, so windowed mode can never produce a window larger than
-  the screen. On Windows the process also declares per-monitor DPI awareness
+  The resolution row changes meaning with the display mode (`WINDOW SIZE` /
+  `RENDER RES` / `DISPLAY RES`) and the refresh row is only live in exclusive
+  fullscreen, so the picker can only ever offer combinations the backend really
+  supports.
+- Display management lives behind `Platform::applyDisplayMode(mode, w, h, hz)`
+  with `DisplayMode` = `Windowed` / `Borderless` / `Exclusive` (plus
+  `monitorSize`, `displayModeCount/At`, `currentDisplayMode`). The menu builds
+  its lists from the backend (`Settings::windowModes`, `renderModes`,
+  `exclusiveModes`, `refreshRates`) and only ever edits `Settings`; `Game`
+  applies the result, so the UI has no platform-specific code.
+  - **Windowed**: monitor aware (`Platform::maxWindowSize`), the picker offers
+    only presets the display can show (up to 3840x2160) plus a `MAX` entry for
+    the largest window that fits the work area, `Platform::resize` clamps every
+    request, and the window is re-centred on the monitor, so windowed mode can
+    never produce a window larger than the screen.
+  - **Borderless**: the window is locked to the monitor's native resolution
+    (`WS_POPUP` + monitor rect on Win32, `_NET_WM_STATE_FULLSCREEN` on X11) and
+    the resolution row becomes a *render scale*: `Game::renderSizeFor` feeds the
+    3D pass a smaller (or larger, for supersampling) render target which the
+    renderer draws into an FBO and upscales with a full-screen blit, while the
+    UI pass, menu, crosshair and fonts always run at the native window
+    resolution — low-res 3D without blurry text. `Settings::fitRenderAspect`
+    re-shapes the chosen preset to the window's aspect ratio at the same pixel
+    budget (identity on 16:9, so a 16:10/4:3 monitor cannot stretch).
+  - **Exclusive**: `EnumDisplaySettingsExA` / `XRRGetScreenResourcesCurrent`
+    enumerate the driver's real modes (deduplicated, sorted by area then
+    refresh), `ChangeDisplaySettingsExA(CDS_FULLSCREEN)` / `XRRSetCrtcConfig`
+    switch resolution + refresh (with the previous desktop configuration
+    remembered and restored on exit), and the picker shows exactly that pool. On Windows the process also declares per-monitor DPI awareness
   before creating the window (otherwise a scaled desktop virtualizes the client
   area: windows come out physically bigger than requested and mouse coordinates
   no longer match what is drawn) and follows `WM_DPICHANGED` /
@@ -112,13 +136,24 @@ fully testable and benchmarkable on machines without a display or GPU.
   matching integer bitmap-font scale) so it keeps its apparent size on a
   high-DPI display, dropping back a step when the panel would not fit the
   window.
-- Settings apply live (mixer gain, `Platform::resize`, projection FOV and sky
-  half-FOV tangents, look scale, `Platform::setFullscreen`) and persist to
-  `settings.cfg`. Restart clears
+- Every display change is **provisional**: `Game::requestDisplayApply` applies
+  it, then a modal `DisplayConfirm` overlay asks *"keep these display settings?
+  reverting in N s"* (`Settings::kDisplayConfirmSeconds` = 15 s). Confirming
+  writes `settings.cfg` and promotes the configuration to the new stable state;
+  `Esc`, the timeout or **REVERT** call `Game::revertDisplayChange`, which
+  restores the last confirmed configuration (falling back to a fitting window
+  if even that is refused) — so an unsupported mode can never stick. A refused
+  change is undone immediately instead of showing the dialog. A restored
+  exclusive mode is provisional at startup too, with a window as the revert
+  target until the user accepts it. The dialog swallows the key that opened it
+  (a held `Enter` cannot auto-confirm) and freezes the menu below it.
+- Settings apply live (mixer gain, display configuration, projection FOV and sky
+  half-FOV tangents, look scale) and persist to `settings.cfg` (hand-editable:
+  display modes are also accepted as `windowed` / `borderless` / `exclusive`
+  names). Restart clears
   the brick store, cancels lerps, reseeds the starting platform and respawns
-  the player. Fullscreen is EWMH (`_NET_WM_STATE`) on X11, borderless
-  monitor-cover on Win32, and a no-op headless; the saved choice is applied
-  at startup.
+  the player. The saved display choice is applied at startup; headless is a
+  no-op that accepts every mode so the same code paths stay testable.
 - Audio is a tiny procedural engine: a mixer thread renders up to 8
   synthesized one-shots (48 kHz stereo int16) into a platform backend — WinMM
   on Windows, PulseAudio-simple with an ALSA fallback on Linux (both `dlopen`,
@@ -131,4 +166,12 @@ fully testable and benchmarkable on machines without a display or GPU.
 - The headless platform and the scripted demo driver produce deterministic runs.
 - Unit tests cover grid math, the brick store, streaming + persistence, the
   controller (landing/jumping/wall), pull/push including the occupancy rule,
-  settings (clamp/parse/modes), menu keyboard navigation, and restart.
+  settings (clamp/parse/mode names/round-trip), the display-mode list builders
+  (windowed fit + `MAX` de-duplication, render-mode insertion of the native
+  size, exclusive de-duplication, refresh rates + `DEFAULT`), the confirmation
+  dialog (countdown, `Enter`/`Esc`, held-key and click edge cases, button
+  hit-testing), the apply/confirm/revert flow on the backend, monitor-aware
+  window sizing, menu keyboard navigation and restart. Nine mutation tests on
+  the display logic (list filtering, `DEFAULT` entry, stepper, countdown,
+  `Esc`, startup-confirmation rule, revert and persist paths) are all caught by
+  the suite.
