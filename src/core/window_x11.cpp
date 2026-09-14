@@ -588,9 +588,15 @@ public:
         mouseX_ = w / 2; mouseY_ = h / 2;
         if (dpy_ && x_.XResizeWindow) {
             x_.XResizeWindow(dpy_, win_, (unsigned)w, (unsigned)h);
-            // Re-center on the (active) screen.
-            if (mode_ == DisplayMode::Windowed && x_.XMoveWindow)
-                x_.XMoveWindow(dpy_, win_, (desktopW_ - w) / 2, (desktopH_ - h) / 2);
+            // Re-center on the (active) screen every time the size changes.
+            if (mode_ == DisplayMode::Windowed && x_.XMoveWindow) {
+                WorkArea work;
+                work.width = desktopW_;
+                work.height = desktopH_;
+                int mx = 0, my = 0;
+                centerWindowIn(work, w, h, mx, my);
+                x_.XMoveWindow(dpy_, win_, mx, my);
+            }
             if (x_.XSync) x_.XSync(dpy_, 0);
         }
     }

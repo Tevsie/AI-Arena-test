@@ -12,8 +12,10 @@
 //     a blind screen (see display_confirm.hpp).
 //
 // Resolution rows are list driven and depend on the display mode:
-//   Windowed   "WINDOW SIZE"  — client sizes that fit the desktop minus
-//                               decorations/taskbar (never off-screen).
+//   Windowed   "WINDOW SIZE"  — standard client sizes (HD..4K) that fit the
+//                               desktop minus decorations/taskbar; a leftover
+//                               non-standard value is snapped to the largest
+//                               standard size the screen can show.
 //   Borderless "RENDER RES"   — internal 3D render resolution (up to 4K, above
 //                               native = supersampling) with a scale percentage;
 //                               the window itself stays at the native size.
@@ -75,17 +77,22 @@ public:
                       text ? text : "");
     }
 
+    // Keeps the keyboard/mouse edge state current while something else owns the
+    // input (the confirmation dialog). Without this the key that dismisses the
+    // dialog (Enter) would look like a *fresh* press to the menu on the next
+    // frame and step the resolution a second time — one action, two changes and
+    // two dialogs. The menu is frozen, but it must not re-fire stale keys.
+    void syncInput(const FrameInput& in) {
+        std::memcpy(prevKeys_, in.keys, sizeof(prevKeys_));
+        mouseHeld_ = in.mousePressed[MBTN_LEFT] && !in.mouseReleased[MBTN_LEFT];
+    }
+
     void update(const FrameInput& in, Settings& s, Audio& a, Platform& p) {
-        // The window can also be resized outside the menu (border drag,
-        // maximize, display change), so mirror the real client size — but only
-        // in plain windowed mode: borderless/exclusive fullscreen sizes come
-        // from the monitor and must not overwrite the windowed preference.
-        if (s.mode == DisplayMode::Windowed &&
-            in.width >= Settings::kMinWindowW && in.height >= Settings::kMinWindowH &&
-            (in.width != s.width || in.height != s.height)) {
-            s.width = in.width;
-            s.height = in.height;
-        }
+        // The window size is *not* mirrored from the live client size: the
+        // resolution setting is always one of the standard presets (HD..4K), and
+        // a backend that had to clamp the window to the screen must not turn
+        // that into a made-up resolution like 1003x986 (nor make the setting
+        // disagree with what was just applied, which re-triggered an apply).
         computeLayout(in.width, in.height, p.uiScale());
         refreshLabels(s, p);
 

@@ -113,7 +113,7 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 
 | Mode           | Window                                | Resolution row                                    |
 |----------------|---------------------------------------|---------------------------------------------------|
-| `WINDOWED`     | Real window with borders, client area = the selected size, re-centred on the monitor | Window **client size**: 1280×720, 1600×900, 1920×1080, 2560×1440, 3840×2160 — but only the sizes your screen can show, plus `MAX` (largest window that fits) |
+| `WINDOWED`     | Real window with borders, client area = the selected size, re-centred on the monitor **every time you change the resolution** | Window **client size** — always a standard size: 1280×720 (HD), 1600×900 (HD+), 1920×1080 (Full HD), 2560×1440 (QHD), 3840×2160 (4K), filtered to what your screen can show. A leftover non-standard value from an older version (e.g. 1003×986) is snapped to the largest standard size that fits |
 | `BORDERLESS`   | Borderless window covering the whole monitor at its native resolution (no mode switch, instant `Alt+Tab`) | **Render resolution**: the 3D scene is drawn at this size and upscaled to the window; the UI, menu and crosshair always render at native window resolution, so text stays crisp. The chosen preset keeps its pixel budget but takes the monitor's shape, so upscaling never stretches the image |
 | `EXCLUSIVE`    | Driver mode switch (`ChangeDisplaySettingsEx` / XRandR): real hardware resolution + refresh rate | Strictly the modes your driver reports for this display (lowest → highest) |
 
@@ -122,13 +122,16 @@ settings? Reverting in 15 s"* — `Enter`/`Space`/click **KEEP** saves it to
 `settings.cfg`; `Esc`, the timeout, or **REVERT** instantly restore the last
 confirmed configuration (a restored exclusive mode at startup is provisional
 too), so a mode your monitor cannot show can never leave you with a black
-screen.
+screen. One action is one dialog: the confirmation appears once per change (the
+key that dismisses it cannot immediately repeat the change underneath), and no
+new change can start while the countdown is running.
 
-Windowed mode always fits your monitor: the requested size is clamped to the
-work area (screen minus taskbar and window decorations), sizes that cannot be
-shown are skipped by the resolution picker, a saved `settings.cfg` size is
-fitted down at startup, and the window is re-fitted if you move it to another
-display or change the desktop resolution. On Windows the process declares
+Windowed mode always fits your monitor: the picker only offers standard sizes
+that the work area (screen minus taskbar and window decorations) can really
+show, a saved `settings.cfg` size is fitted down at startup, and the window is
+re-fitted — and re-centred — if you move it to another display, change the
+desktop resolution, or pick another size (a maximized window is restored first,
+because a maximized window cannot be sized or moved). On Windows the process declares
 per-monitor DPI awareness *before* the window is created, so the client area,
 the GL viewport and the mouse coordinates are all in real screen pixels —
 otherwise a scaled (125 %/150 %) display makes windows physically larger than

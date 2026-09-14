@@ -343,6 +343,10 @@ public:
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
         if (mode_ != DisplayMode::Windowed) { pendingW_ = w; pendingH_ = h; return; }
+        // A maximized window ignores size changes: leave the maximized state
+        // first, otherwise the new resolution would not be applied (and the
+        // window could not be centered).
+        if (hwnd_ && IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
         // Clamp to what the monitor can show: a windowed window must never be
         // bigger than the screen (the resolution setting asks for a preset, the
         // monitor decides how much of it fits).
@@ -355,16 +359,9 @@ public:
         pendingW_ = w; pendingH_ = h;
         if (!hwnd_) return;   // before init(): remembered for CreateWindow
 
-        // Re-center on the monitor the window currently lives on.
-        int fw = 0, fh = 0;
-        frameSize(windowDpi(), fw, fh);
-        int x = 0, y = 0;
-        centerWindowOnMonitor(w + fw, h + fh, x, y);
-        SetWindowPos(hwnd_, nullptr, x, y, w + fw, h + fh, SWP_NOZORDER | SWP_NOACTIVATE);
-        // Apply immediately so this frame already renders the new size (the
-        // asynchronous WM_SIZE confirms it afterwards).
-        syncClientSize();
-        keepCursorInside();
+        // Re-center on the monitor the window currently lives on every time the
+        // size changes (the frame is size-dependent, so it is measured here).
+        placeWindowed(w, h);
     }
 
     // ---- display modes -----------------------------------------------------
@@ -377,11 +374,16 @@ public:
 
         switch (mode) {
             case DisplayMode::Windowed: {
+                bool wasFullscreen = mode_ != DisplayMode::Windowed;
                 restoreDesktopMode();          // undo an exclusive switch first
-                setBorderless(false);
                 mode_ = DisplayMode::Windowed;
                 refreshMonitorInfo();
-                resize(w > 0 ? w : width_, h > 0 ? h : height_);
+                setBorderless(false);          // frame wins before measuring it
+                // Leaving fullscreen keeps the current size but must still
+                // center the window; a resolution change centers it too.
+                resize(w > 0 ? w : (wasFullscreen ? pendingW_ : width_),
+                       h > 0 ? h : (wasFullscreen ? pendingH_ : height_));
+                centerOnMonitor();
                 return true;
             }
             case DisplayMode::Borderless: {
@@ -678,21 +680,64 @@ private:
 
     // Centre a window of `winW x winH` on the monitor the window is on (the
     // requirement: a resized window is re-centered on the active monitor).
-    void centerWindowOnMonitor(int winW, int winH, int& x, int& y) const {
+    // Usable area of the window's monitor (fallback: the primary monitor).
+    WorkArea workAreaOfMonitor() const {
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);
-        if (!GetMonitorInfoA(monitor(), &mi)) {
+        WorkArea work;
+        if (!GetMonitorInfoA(monitor(), &mi)) return work;
+        work.x = int(mi.rcWork.left);
+        work.y = int(mi.rcWork.top);
+        work.width = int(mi.rcWork.right - mi.rcWork.left);
+        work.height = int(mi.rcWork.bottom - mi.rcWork.top);
+        return work;
+    }
+
+    void centerWindowOnMonitor(int winW, int winH, int& x, int& y) const {
+        WorkArea work = workAreaOfMonitor();
+        if (work.width <= 0 || work.height <= 0) {
             x = CW_USEDEFAULT; y = CW_USEDEFAULT;
             return;
         }
-        const RECT& wa = mi.rcWork;
-        int availW = wa.right - wa.left, availH = wa.bottom - wa.top;
-        x = wa.left + (availW - winW) / 2;
-        y = wa.top + (availH - winH) / 2;
-        if (x + winW > wa.right) x = wa.right - winW;
-        if (y + winH > wa.bottom) y = wa.bottom - winH;
-        if (x < wa.left) x = wa.left;
-        if (y < wa.top) y = wa.top;
+        centerWindowIn(work, winW, winH, x, y);
+    }
+
+    // Centers the window on its monitor without changing its size (used when
+    // the size is already right, e.g. leaving fullscreen).
+    void centerOnMonitor() {
+        if (!hwnd_ || mode_ != DisplayMode::Windowed) return;
+        RECT wr{};
+        if (!GetWindowRect(hwnd_, &wr)) return;
+        int x = 0, y = 0;
+        centerWindowOnMonitor(int(wr.right - wr.left), int(wr.bottom - wr.top), x, y);
+        if (x == CW_USEDEFAULT) return;
+        SetWindowPos(hwnd_, nullptr, x, y, 0, 0,
+                     SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        keepCursorInside();
+    }
+
+    // Moves (and centers) an existing window for a `w x h` client area. Called
+    // after every windowed change so the window is centered on the monitor each
+    // time the resolution changes.
+    void placeWindowed(int w, int h) {
+        if (!hwnd_) return;
+        int fw = 0, fh = 0;
+        frameSize(windowDpi(), fw, fh);
+        int x = 0, y = 0;
+        centerWindowOnMonitor(w + fw, h + fh, x, y);
+        SetWindowPos(hwnd_, nullptr, x, y, w + fw, h + fh,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        syncClientSize();
+        // Windows may have adjusted the client rect (min/max tracking); re-center
+        // once more against the size we really got so the window ends up exactly
+        // in the middle instead of drifting when it grows/shrinks.
+        if (width_ != w || height_ != h) {
+            centerWindowOnMonitor(width_ + fw, height_ + fh, x, y);
+            SetWindowPos(hwnd_, nullptr, x, y, width_ + fw, height_ + fh,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            syncClientSize();
+        }
+        keepCursorInside();
     }
 
     void centerOnPrimaryMonitor(int winW, int winH, int& x, int& y) const {

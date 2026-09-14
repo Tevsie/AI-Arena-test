@@ -169,21 +169,90 @@ bool Game::applyDisplayConfig(const DisplayConfig& cfg) {
 
 // Called when the menu changed a display row: apply it provisionally and ask
 // the user to confirm (an unusable mode must never be saved silently).
+// Windowed sizes are standard presets, so keep the setting on the largest one
+// this monitor can really show: otherwise the backend would have to clamp the
+// window and the setting (1920x1080) would disagree with the real client area
+// (e.g. 1902x1003) -- which also re-triggered an apply loop. No-op for the other
+// modes (their window is the monitor, and exclusive has its own mode pool).
+void Game::fitWindowSizeToMonitor(Settings& s, Platform& p) {
+    if (s.mode != DisplayMode::Windowed) return;
+    int availW = 0, availH = 0;
+    if (p.maxWindowSize(availW, availH)) s.fitToMonitor(availW, availH);
+}
+
 bool Game::requestDisplayApply() {
+    // One dialog at a time: while the user is deciding, the menu cannot start a
+    // second change (and once applied, the same configuration is not re-applied,
+    // which used to show the confirmation twice for a single key press).
+    if (displayConfirm_.active()) {
+        fprintf(stderr, "[aw] display change ignored, confirmation pending\n");
+        return false;
+    }
+    // Windowed sizes are standard presets, so pick the largest one this monitor
+    // can actually show *before* applying: otherwise the backend would have to
+    // clamp the window and the setting (1920x1080) would disagree with the real
+    // client area (e.g. 1902x1003).
+    fitWindowSizeToMonitor(settings_, *platform_);
     const DisplayConfig want = displayConfigOf(settings_);
-    if (want == displayStable_) return true;      // nothing to do
+    if (want == displayStable_ || want == displayPending_) return true;   // nothing to do
     if (!applyDisplayConfig(want)) {
         setDisplayConfig(settings_, displayStable_);   // refused: undo the edit
+        displayPending_ = displayStable_;
         if (menuOpen_) menu_.setNotice("DISPLAY CHANGE NOT SUPPORTED");
         fprintf(stderr, "[aw] display change refused, keeping %s\n",
                 displayModeName(displayStable_.mode));
         return false;
     }
+    displayPending_ = want;
     char label[48];
     describeDisplayConfig(want, label, sizeof(label));
     displayConfirm_.begin(Settings::kDisplayConfirmSeconds, label, pendingHeldKeys_);
     fprintf(stderr, "[aw] display change applied provisionally: %s\n", label);
     return true;
+}
+
+// Opens the settings overlay (pause). The menu mirrors the settings, so it
+// always opens on the values that are in effect.
+void Game::openMenu() {
+    menuOpen_ = true;
+    menu_.open();
+    if (platform_) platform_->setCursorCaptured(false);
+}
+
+void Game::closeMenu() {
+    menuOpen_ = false;
+    settings_.save();
+    if (platform_) platform_->setCursorCaptured(true);
+}
+
+// One frame of the settings overlay, after the confirmation dialog has had its
+// turn with the input.
+void Game::updateMenuFrame(const FrameInput& in, bool modalActive) {
+    if (!menuOpen_) return;
+    // The dialog is modal: the menu stays visible but frozen below it — it keeps
+    // tracking the key/mouse edges though (Menu::syncInput), so the very key
+    // that dismisses the dialog cannot be seen as a new press by the menu on the
+    // next frame. Without that, one Enter both confirmed the dialog *and* stepped
+    // the resolution again: two changes and two dialogs for a single action.
+    if (modalActive) menu_.syncInput(in);
+    else menu_.update(in, settings_, audio_, *platform_);
+    setPendingHeldKeys(in.keys);
+    if (menu_.consumeDisplayApply()) requestDisplayApply();
+    setPendingHeldKeys(nullptr);
+
+    if (menu_.consumeRestart()) {
+        restart();
+        closeMenu();
+    }
+    if (menu_.consumeResume()) closeMenu();
+    if (menu_.consumeQuit()) quitRequested_ = true;   // the loop saves and exits
+}
+
+// Test/demo hook: runs the overlay for one frame with a supplied input instead
+// of one read from the platform (the real loop calls the same two steps).
+void Game::stepOverlay(const FrameInput& in, float dt) {
+    const bool modalActive = pollDisplayConfirm(in, dt);
+    updateMenuFrame(in, modalActive);
 }
 
 // Drives the modal display-confirmation dialog. Returns true while it owns the
@@ -194,6 +263,7 @@ bool Game::pollDisplayConfirm(const FrameInput& in, float dt) {
     DisplayConfirm::Decision d = displayConfirm_.update(in, dt, platform_->uiScale());
     if (d == DisplayConfirm::Keep) {
         displayStable_ = displayConfigOf(settings_);
+        displayPending_ = displayStable_;
         settings_.save();              // confirmed -> persist
         fprintf(stderr, "[aw] display settings confirmed and saved\n");
     } else if (d == DisplayConfirm::Revert) {
@@ -219,6 +289,7 @@ void Game::revertDisplayChange() {
         applyDisplayConfig(displayConfigOf(settings_));
         displayStable_ = displayConfigOf(settings_);
     }
+    displayPending_ = displayStable_;
     if (menuOpen_) menu_.setNotice("DISPLAY SETTINGS REVERTED");
     settings_.save();              // the file follows the display again
     fprintf(stderr, "[aw] display settings reverted\n");
@@ -357,39 +428,19 @@ void Game::run() {
         // fullscreen); the simulation pauses while it is open.
         bool esc = in.keys[KEY_ESC] != 0;
         if (esc && !prevEsc_ && !headless() && !modalActive) {
-            menuOpen_ = !menuOpen_;
-            if (menuOpen_) menu_.open();
-            else settings_.save();
-            platform_->setCursorCaptured(!menuOpen_);
+            if (menuOpen_) closeMenu();
+            else openMenu();
         }
         prevEsc_ = esc;
 
-        if (menuOpen_) {
-            // The dialog is modal: the menu stays visible but frozen below it.
-            if (!modalActive) menu_.update(in, settings_, audio_, *platform_);
-            setPendingHeldKeys(in.keys);
-            if (menu_.consumeDisplayApply()) requestDisplayApply();
-            setPendingHeldKeys(nullptr);
+        const bool menuWasOpen = menuOpen_;
+        if (menuWasOpen) {
+            updateMenuFrame(in, modalActive);
             // The menu can resize the window (resolution setting): pick the new
             // client size up right away so this frame renders the size the
             // window actually has.
             int cw = 0, ch = 0;
             if (platform_->clientSize(cw, ch)) { in.width = cw; in.height = ch; }
-            if (menu_.consumeRestart()) {
-                restart();
-                menuOpen_ = false;
-                settings_.save();
-                platform_->setCursorCaptured(true);
-            }
-            if (menu_.consumeResume()) {
-                menuOpen_ = false;
-                settings_.save();
-                platform_->setCursorCaptured(true);
-            }
-            if (menu_.consumeQuit()) {
-                settings_.save();
-                break;
-            }
         } else {
             if (headless()) demoDrive(dt);
 
@@ -399,6 +450,10 @@ void Game::run() {
                 if (wasGrounded && in.keys[KEY_SPACE]) audio_.play(Sfx::Jump);
                 if (!wasGrounded && player_.grounded) audio_.play(Sfx::Land);
             }
+        }
+        if (quitRequested_) {
+            settings_.save();
+            break;
         }
 
         if (!headless()) {

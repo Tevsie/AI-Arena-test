@@ -63,6 +63,36 @@ struct DisplayModeInfo {
     int refreshHz = 0;
 };
 
+// Usable desktop area (screen minus taskbar/docks) of one monitor, in virtual
+// screen pixels. Used to center a window and to clamp windowed sizes.
+struct WorkArea {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+
+    int right() const { return x + width; }
+    int bottom() const { return y + height; }
+};
+
+// Top-left corner that centers a `winW x winH` window (outer size, frame
+// included) inside `work`, clamped so the window always stays fully on the
+// monitor even when it is wider/taller than the work area. Shared by the
+// windowed backends and unit tested (backends cannot be run in CI).
+inline void centerWindowIn(const WorkArea& work, int winW, int winH, int& x, int& y) {
+    if (winW <= 0 || winH <= 0 || work.width <= 0 || work.height <= 0) {
+        x = work.x;
+        y = work.y;
+        return;
+    }
+    x = work.x + (work.width - winW) / 2;
+    y = work.y + (work.height - winH) / 2;
+    if (x + winW > work.right()) x = work.right() - winW;
+    if (y + winH > work.bottom()) y = work.bottom() - winH;
+    if (x < work.x) x = work.x;
+    if (y < work.y) y = work.y;
+}
+
 // Quantize a DPI-derived UI scale onto the supported half steps, clamped to
 // 1.0..2.0: 96 dpi -> 1.0, 120/144 dpi -> 1.5, 192 dpi -> 2.0. Half steps keep
 // the menu's pixel font and panel layout aligned (see Menu::computeLayout).

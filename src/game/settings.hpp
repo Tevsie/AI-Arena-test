@@ -128,14 +128,20 @@ public:
                 continue;   // does not fit on this monitor
             out[n++] = kPresets[i];
         }
-        if (constrained && n < cap) {
-            Resolution fit{availW, availH};
-            if (fit.w < kMinWindowW) fit.w = kMinWindowW;
-            if (fit.h < kMinWindowH) fit.h = kMinWindowH;
-            if (n == 0 || !(out[n - 1] == fit)) out[n++] = fit;
-        }
-        if (n == 0) out[n++] = kPresets[0];   // never empty
+        // Every entry is a standard size (HD .. 4K): if the work area cannot
+        // show even 720p, the smallest one is still offered and the backend
+        // clamps the window to the screen. An arbitrary "fit the work area"
+        // entry (e.g. 1003x986) is deliberately not offered any more.
+        if (n == 0) out[n++] = kPresets[0];
         return n;
+    }
+
+    // True when w x h is one of the standard presets (the windowed resolution
+    // list can only ever contain these).
+    static bool isStandardResolution(int w, int h) {
+        for (int i = 0; i < kPresetCount; ++i)
+            if (kPresets[i].w == w && kPresets[i].h == h) return true;
+        return false;
     }
 
     // Borderless render resolutions: presets up to 4K (higher than native =
@@ -144,7 +150,11 @@ public:
         if (!out || cap <= 0) return 0;
         int n = 0;
         for (int i = 0; i < kPresetCount && n < cap; ++i) out[n++] = kPresets[i];
-        if (nativeW > 0 && nativeH > 0 && n < cap) {
+        // The monitor's own resolution is offered too, but only when it is
+        // itself a standard shape (a virtualised/odd desktop size would
+        // otherwise reappear as a "1003x986" style entry; render "native" is
+        // still reachable through the NATIVE default, see Settings::renderWidth).
+        if (nativeW >= kPresets[0].w && nativeH >= kPresets[0].h && n < cap) {
             Resolution nat{nativeW, nativeH};
             int insert = n;
             for (int i = 0; i < n; ++i)
@@ -256,11 +266,22 @@ public:
     }
 
     // Snap the windowed size onto the closest size this monitor can show.
+    // Fits a saved window size to the standard list. A standard size the user
+    // picked is kept as long as the monitor can still show it; anything else —
+    // the leftover "largest window that fits" value of an older build such as
+    // 1003x986, or a size that no longer fits after a monitor change — snaps to
+    // the largest standard size this screen can show (720p at the very least)
+    // instead of being clamped to a made-up resolution.
     void fitToMonitor(int availW, int availH) {
         Resolution modes[kMaxModes];
         int n = windowModes(modes, kMaxModes, availW, availH);
-        int i = modeIndex(modes, n, width, height);
-        if (i >= 0) { width = modes[i].w; height = modes[i].h; }
+        if (isStandardResolution(width, height)) {
+            for (int i = 0; i < n; ++i) {
+                if (modes[i].w == width && modes[i].h == height) { clamp(); return; }
+            }
+        }
+        width = modes[n - 1].w;
+        height = modes[n - 1].h;
         clamp();
     }
 

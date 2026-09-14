@@ -78,6 +78,8 @@ public:
     // A restored exclusive mode must be confirmed by the user before it counts
     // as the stable configuration (see init()).
     static bool needsStartupConfirm(DisplayMode mode, bool headless);
+    // Keeps a windowed size on the standard presets the monitor can show.
+    static void fitWindowSizeToMonitor(Settings& s, Platform& p);
     // Applies the pending display settings and starts the confirm dialog.
     // Returns false when the backend refused the change (settings are restored).
     bool requestDisplayApply();
@@ -86,6 +88,13 @@ public:
     // Runs the modal confirmation dialog for one frame; true while it is active
     // (it then owns the input). Called by the main loop.
     bool pollDisplayConfirm(const FrameInput& in, float dt);
+    // Settings overlay: open/close (Esc) and one frame of input handling (the
+    // modal dialog is polled first, then the menu, then pending display changes).
+    void openMenu();
+    void closeMenu();
+    void updateMenuFrame(const FrameInput& in, bool modalActive);
+    // Test/demo hook: the overlay for one frame with a supplied input.
+    void stepOverlay(const FrameInput& in, float dt);
     // Key state used when the confirm dialog opens (see DisplayConfirm::begin).
     void setPendingHeldKeys(const uint8_t* keys);
     bool displayConfirmActive() const { return displayConfirm_.active(); }
@@ -120,8 +129,10 @@ private:
     // Display state: the last configuration the user confirmed, plus the modal
     // dialog shown while a new one is provisional.
     DisplayConfig displayStable_;
+    DisplayConfig displayPending_;   // provisionally applied, awaiting confirmation
     DisplayConfirm displayConfirm_;
     uint8_t pendingHeldKeys_[512]{};
+    bool quitRequested_ = false;
 
     double lastTime_ = 0.0;
     ChunkCoord lastChunk_{0, 0};

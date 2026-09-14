@@ -109,11 +109,17 @@ fully testable and benchmarkable on machines without a display or GPU.
   its lists from the backend (`Settings::windowModes`, `renderModes`,
   `exclusiveModes`, `refreshRates`) and only ever edits `Settings`; `Game`
   applies the result, so the UI has no platform-specific code.
-  - **Windowed**: monitor aware (`Platform::maxWindowSize`), the picker offers
-    only presets the display can show (up to 3840x2160) plus a `MAX` entry for
-    the largest window that fits the work area, `Platform::resize` clamps every
-    request, and the window is re-centred on the monitor, so windowed mode can
-    never produce a window larger than the screen.
+  - **Windowed**: monitor aware (`Platform::maxWindowSize`) and *standard*:
+    only HD/HD+/Full HD/QHD/4K presets that the work area can show are offered
+    (`Settings::windowModes`), and `Settings::fitToMonitor` snaps any other value
+    (an older build's "largest window that fits", e.g. 1003x986, or a size saved
+    on a bigger monitor) to the largest standard one this screen supports, so a
+    made-up resolution is never applied *and* the setting always agrees with the
+    real client area (a mismatch re-triggered an apply). `Game::requestDisplayApply`
+    snaps before the backend is asked, `Platform::resize` still clamps as a last
+    resort, and the window is re-centred on the monitor by every change
+    (`PlatformWin32::placeWindowed` / X11 `resize` via `centerWindowIn`), leaving
+    a maximized state first because a maximized window ignores size/move.
   - **Borderless**: the window is locked to the monitor's native resolution
     (`WS_POPUP` + monitor rect on Win32, `_NET_WM_STATE_FULLSCREEN` on X11) and
     the resolution row becomes a *render scale*: `Game::renderSizeFor` feeds the
@@ -136,6 +142,12 @@ fully testable and benchmarkable on machines without a display or GPU.
   matching integer bitmap-font scale) so it keeps its apparent size on a
   high-DPI display, dropping back a step when the panel would not fit the
   window.
+- Display changes are **once per action**: the menu is frozen (not stale) while
+  the dialog is up — `Menu::syncInput` keeps its key/mouse edge state current so
+  the `Enter` that confirms the dialog is not seen as a fresh press by the row
+  underneath (which used to step it again: two dialogs per key press), and
+  `Game::requestDisplayApply` refuses to start a second change while a dialog is
+  open or when the configuration is already the pending/stable one.
 - Every display change is **provisional**: `Game::requestDisplayApply` applies
   it, then a modal `DisplayConfirm` overlay asks *"keep these display settings?
   reverting in N s"* (`Settings::kDisplayConfirmSeconds` = 15 s). Confirming

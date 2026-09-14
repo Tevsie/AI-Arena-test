@@ -560,25 +560,47 @@ static void testRenderAspectFit() {
 static void testDisplayModeLists() {
     Resolution modes[Settings::kMaxModes];
 
-    // ---- windowed: presets that fit + the largest window that fits ---------
+    // ---- windowed: only the standard sizes that fit ------------------------
     int n = Settings::windowModes(modes, Settings::kMaxModes, 0, 0);
     CHECK(n == Settings::kPresetCount);                       // monitor unknown
     CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2160);  // up to 4K
-    // 4K desktop minus decorations: 4K does not fit, 1440p does, and the usable
-    // area becomes the MAX entry.
+    // 4K desktop minus decorations: 4K no longer fits, 1440p is the largest.
     n = Settings::windowModes(modes, Settings::kMaxModes, 3840, 2120);
-    CHECK(n == Settings::kPresetCount);
-    CHECK(modes[n - 2].w == 2560 && modes[n - 2].h == 1440);
-    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2120);
-    // 1080p screen: 1440p and 4K are dropped; the usable area equals the 1080p
-    // preset, so it is not listed twice.
+    CHECK(n == Settings::kPresetCount - 1);
+    CHECK(modes[n - 1].w == 2560 && modes[n - 1].h == 1440);
+    // 1080p screen with a taskbar and window frame: 1440p/4K are dropped, and
+    // because a 1920x1080 *window* cannot fit a 1902x1003 work area the list
+    // ends at 1600x900 -- no made-up "1902x1003" entry.
+    n = Settings::windowModes(modes, Settings::kMaxModes, 1902, 1003);
+    CHECK(n == 2);
+    CHECK(modes[n - 1].w == 1600 && modes[n - 1].h == 900);
+    for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
     n = Settings::windowModes(modes, Settings::kMaxModes, 1920, 1080);
     CHECK(n == 3);
     CHECK(modes[2].w == 1920 && modes[2].h == 1080);
-    // Tiny screen: only the largest usable size remains.
+    // Every entry is a standard size, whatever the work area looks like.
+    const int areas[][2] = {{1003, 986}, {1279, 719}, {640, 400}, {1366, 728}, {3840, 2120}};
+    for (const auto& a : areas) {
+        n = Settings::windowModes(modes, Settings::kMaxModes, a[0], a[1]);
+        CHECK(n >= 1);
+        for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
+    }
+    // A screen too small for any preset still offers the smallest standard size
+    // (the backend clamps the window to the screen).
     n = Settings::windowModes(modes, Settings::kMaxModes, 640, 400);
     CHECK(n == 1);
-    CHECK(modes[0].w == 640 && modes[0].h == 400);
+    CHECK(modes[0].w == 1280 && modes[0].h == 720);
+    // A leftover non-standard saved size snaps onto the standard list.
+    Settings s;
+    s.width = 1003; s.height = 986;                  // e.g. written by an older build
+    s.fitToMonitor(1902, 1003);
+    CHECK(s.width == 1600 && s.height == 900);
+    s.width = 3840; s.height = 2160;                 // too big for this screen
+    s.fitToMonitor(1902, 1003);
+    CHECK(s.width == 1600 && s.height == 900);
+    s.width = 1280; s.height = 720;                  // a standard size is kept
+    s.fitToMonitor(3840, 2120);
+    CHECK(s.width == 1280 && s.height == 720);
 
     // ---- borderless: render resolutions up to 4K + the native resolution ----
     n = Settings::renderModes(modes, Settings::kMaxModes, 1920, 1080);
@@ -587,10 +609,15 @@ static void testDisplayModeLists() {
     int nativeEntry = 0;
     for (int i = 0; i < n; ++i) if (modes[i].w == 1920 && modes[i].h == 1080) ++nativeEntry;
     CHECK(nativeEntry == 1);                  // native is already a preset: no duplicate
-    // An odd native resolution is inserted in ascending order.
+    // A native resolution between two presets is inserted in ascending order.
     n = Settings::renderModes(modes, Settings::kMaxModes, 1366, 768);
     CHECK(n == Settings::kPresetCount + 1);
     CHECK(modes[1].w == 1366 && modes[1].h == 768);
+    // A virtualised/odd desktop size is not offered as a render resolution; the
+    // "native" default (renderWidth = 0) still renders at the real size.
+    n = Settings::renderModes(modes, Settings::kMaxModes, 1003, 986);
+    CHECK(n == Settings::kPresetCount);
+    for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
     // Unknown monitor: presets alone.
     n = Settings::renderModes(modes, Settings::kMaxModes, 0, 0);
     CHECK(n == Settings::kPresetCount);
@@ -974,19 +1001,20 @@ static void testUiScale() {
 
 // ---------------------------------------------------------------------------
 static void testWindowSizing() {
-    // A 1366x768 laptop: the usable work area (taskbar + borders removed) fits
-    // 720p but nothing larger, and the driver offers two modes.
+    // A 1920x1080 laptop whose usable area (taskbar + window frame removed) is
+    // 1902x1003, the exact situation that used to produce a "1902x1003" entry.
     StubPlatform plat;
-    plat.setMonitor(1366, 728);
-    plat.setDesktop(1366, 768);
+    plat.setMonitor(1902, 1003);
+    plat.setDesktop(1920, 1080);
     plat.addDriverMode(1280, 720, 60);
-    plat.addDriverMode(1366, 768, 60);
+    plat.addDriverMode(1920, 1080, 60);
     plat.init("t", 1280, 720);
     Audio audio;
     audio.init(false);
     Settings s;
     Menu m;
     m.open();
+    int displayApplies = 0;
 
     auto baseInput = [&]() {
         FrameInput in;
@@ -998,7 +1026,7 @@ static void testWindowSizing() {
         FrameInput in = baseInput();
         if (key) in.keys[key] = 1;
         m.update(in, s, audio, plat);
-        applyPendingDisplay(m, s, plat);   // like the game loop
+        if (applyPendingDisplay(m, s, plat)) ++displayApplies;   // like the game loop
     };
     auto navTo = [&](int item) {
         for (int guard = 0; guard < 2 * Menu::Count && m.selected() != item; ++guard) {
@@ -1008,71 +1036,71 @@ static void testWindowSizing() {
         CHECK(m.selected() == item);
     };
 
-    // ---- windowed: bounded by the usable work area -------------------------
+    // ---- windowed: standard client sizes that fit the work area ------------
     navTo(Menu::Resolution);
     CHECK(s.width == 1280 && s.height == 720);
     frame(KEY_RIGHT);
     frame(0);
-    CHECK(s.width == 1366 && s.height == 728);            // the largest that fits
-    CHECK(plat.width() == 1366 && plat.height() == 728);  // backend resized
-    CHECK(plat.mode() == DisplayMode::Windowed);
-    CHECK(plat.applyCount() > 0);
+    CHECK(s.width == 1600 && s.height == 900);                 // 1080p needs 1920 wide
+    CHECK(plat.width() == 1600 && plat.height() == 900);       // backend resized
+    CHECK(Settings::isStandardResolution(s.width, s.height));
     frame(KEY_RIGHT);
     frame(0);
-    CHECK(s.width == 1280 && s.height == 720);            // nothing bigger: wraps
-    // Whatever the user picks, the window never exceeds the usable area and the
-    // settings always match the real client size.
-    for (int i = 0; i < 8; ++i) {
+    CHECK(s.width == 1280 && s.height == 720);                 // only 2 entries: wraps
+    CHECK(Settings::isStandardResolution(s.width, s.height));
+    // A whole cycle never leaves the standard list and never exceeds the screen.
+    const int applies0 = displayApplies;
+    for (int i = 0; i < 6; ++i) {
         frame(KEY_RIGHT);
         frame(0);
-        CHECK(s.width <= 1366 && s.height <= 728);
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+        CHECK(s.width <= 1902 && s.height <= 1003);
         CHECK(plat.width() == s.width && plat.height() == s.height);
     }
+    CHECK(displayApplies == applies0 + 6);                     // one apply per press
 
-    // ---- borderless: window fullscreen, render resolution is separate ------
-    int keepW = s.width, keepH = s.height;
+    // The window size in the settings stays standard even though the backend
+    // clamps/drags the window: no "1003x986"-style value is ever produced.
+    for (int i = 0; i < 4; ++i) {
+        FrameInput in = baseInput();
+        in.width = 1003; in.height = 986;                      // as if the user dragged
+        m.update(in, s, audio, plat);
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+    }
+    CHECK(displayApplies == applies0 + 6);                      // ...and no re-apply
+
+    // ---- borderless: render resolution list has no odd entry either --------
     navTo(Menu::Mode);
     frame(KEY_RIGHT);
     frame(0);
     CHECK(s.mode == DisplayMode::Borderless);
     CHECK(plat.mode() == DisplayMode::Borderless);
-    CHECK(s.width == keepW && s.height == keepH);          // windowed size kept
-    CHECK(plat.width() == 1366 && plat.height() == 768);   // monitor size
+    CHECK(plat.width() == 1920 && plat.height() == 1080);       // monitor size
     navTo(Menu::Resolution);
-    CHECK(s.renderWidth == 0 && s.renderHeight == 0);      // "native" until set
+    CHECK(s.renderWidth == 0 && s.renderHeight == 0);           // native
     frame(KEY_RIGHT);
     frame(0);
     CHECK(s.renderWidth > 0 && s.renderHeight > 0);
     for (int i = 0; i < 8; ++i) {
         frame(KEY_RIGHT);
         frame(0);
-        CHECK(s.renderWidth >= 1280 && s.renderWidth <= 3840);   // up to 4K
-        CHECK(s.renderHeight >= 720 && s.renderHeight <= 2160);
-        CHECK(plat.width() == 1366 && plat.height() == 768);     // window untouched
+        CHECK(s.renderWidth >= 1280 && s.renderWidth <= 3840);
+        CHECK(Settings::isStandardResolution(s.renderWidth, s.renderHeight));
     }
-    // Supersampling above the monitor is allowed and stays a render-only knob.
-    s.renderWidth = 3840; s.renderHeight = 2160;
-    s.clamp();
-    CHECK(s.renderWidth == 3840 && s.renderHeight == 2160);
-    CHECK(plat.width() == 1366 && plat.height() == 768);
+    CHECK(plat.width() == 1920 && plat.height() == 1080);       // window untouched
 
-    // ---- exclusive: the list is exactly the driver's pool ------------------
+    // ---- exclusive: the list is the driver's pool --------------------------
     navTo(Menu::Mode);
     frame(KEY_RIGHT);
     frame(0);
     CHECK(s.mode == DisplayMode::Exclusive);
     navTo(Menu::Resolution);
-    s.modeWidth = 1366; s.modeHeight = 768; s.modeRefresh = 0;
+    s.modeWidth = 1920; s.modeHeight = 1080; s.modeRefresh = 0;
     frame(KEY_RIGHT);
     frame(0);
-    CHECK(s.modeWidth == 1280 && s.modeHeight == 720);     // largest -> wraps
+    CHECK(s.modeWidth == 1280 && s.modeHeight == 720);          // largest -> wraps
     CHECK(plat.mode() == DisplayMode::Exclusive);
     CHECK(plat.lastW() == 1280 && plat.lastH() == 720);
-    frame(KEY_RIGHT);
-    frame(0);
-    CHECK(s.modeWidth == 1366 && s.modeHeight == 768);
-    // The refresh row is only live in exclusive mode and cycles the rates the
-    // driver reports for the chosen size (plus DEFAULT).
     navTo(Menu::Refresh);
     s.modeRefresh = 0;
     frame(KEY_RIGHT);
@@ -1080,18 +1108,199 @@ static void testWindowSizing() {
     CHECK(s.modeRefresh == 60);
     frame(KEY_RIGHT);
     frame(0);
-    CHECK(s.modeRefresh == 0);                             // DEFAULT
-    // Moving to another size drops a refresh rate that does not exist for it.
-    s.modeWidth = 1024; s.modeHeight = 768;                // not in the pool at all
-    s.modeRefresh = 144;
-    navTo(Menu::Resolution);
-    frame(KEY_RIGHT);
-    frame(0);
-    CHECK(s.modeWidth == 1280 && s.modeHeight == 720);
-    CHECK(s.modeRefresh == 0);
+    CHECK(s.modeRefresh == 0);                                  // DEFAULT
 
     audio.shutdown();
     plat.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for the "changing the resolution asks twice" report: one
+// user action must produce exactly one backend change and exactly one dialog,
+// and the key that dismisses the dialog must not act on the menu underneath it.
+// This drives the real Game overlay path (Game::stepOverlay), not a copy of it.
+static void testDisplayConfirmOnce() {
+    const char* kCfg = "settings_once_test.cfg";
+    FILE* pre = std::fopen(kCfg, "rb");
+    bool hadSettings = (pre != nullptr);
+    if (pre) std::fclose(pre);
+    Settings::setPathForTests(kCfg);
+
+    {
+        Settings saved;
+        saved.mode = DisplayMode::Windowed;
+        saved.width = 1280; saved.height = 720;
+        saved.save();
+        Game g;
+        CHECK(g.init("t", 1280, 720, true));    // headless backend
+        Settings& s = g.settings();
+        Menu& m = g.menu();
+        g.openMenu();
+
+        auto input = [](uint32_t key) {
+            FrameInput in;
+            std::memset(in.keys, 0, sizeof(in.keys));
+            if (key) in.keys[key] = 1;
+            in.width = 1280; in.height = 720;
+            in.mouseX = -1.0f; in.mouseY = -1.0f;
+            return in;
+        };
+        // Counts the changes and the dialogs the user would see.
+        int changes = 0, dialogs = 0;
+        bool dialogWasActive = false;
+        int lastW = s.width, lastH = s.height;
+        auto step = [&](uint32_t key) {
+            FrameInput in = input(key);
+            g.stepOverlay(in, 1.0f / 60.0f);
+            if (s.width != lastW || s.height != lastH) { ++changes; lastW = s.width; lastH = s.height; }
+            bool active = g.displayConfirmActive();
+            if (active && !dialogWasActive) ++dialogs;
+            dialogWasActive = active;
+        };
+
+        // Menu Down presses need a release between them (edge triggered).
+        for (int i = 0; i < 2; ++i) { step(KEY_DOWN); step(0); }
+        CHECK(m.selected() == Menu::Resolution);
+        CHECK(changes == 0 && dialogs == 0);
+
+        // One Right press: exactly one change and one dialog.
+        const int w0 = s.width;
+        step(KEY_RIGHT);
+        CHECK(s.width != w0);
+        CHECK(changes == 1);
+        CHECK(dialogs == 1);
+        CHECK(g.displayConfirmActive());
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+
+        // Right stays held while the dialog is up: the menu must not keep
+        // stepping and the dialog must not be re-opened.
+        for (int i = 0; i < 5; ++i) step(KEY_RIGHT);
+        CHECK(changes == 1 && dialogs == 1);
+        const int w1 = s.width;
+
+        // A windowed size that no longer fits the screen (e.g. saved on a bigger
+        // monitor) snaps to the largest standard preset that does -- the setting
+        // and the real client area never disagree, and no odd size is applied.
+        {
+            Settings onDisk;
+            onDisk.mode = DisplayMode::Windowed;
+            onDisk.save();
+            Game g2;
+            CHECK(g2.init("t", 1280, 720, true));
+            CHECK(Settings::isStandardResolution(g2.settings().width, g2.settings().height));
+        }
+        {
+            // With a backend that reports the real work area, the snap happens
+            // before the window is even asked for that size.
+            StubPlatform plat;
+            plat.setMonitor(1902, 1003);           // 1920x1080 screen + taskbar/frame
+            plat.setDesktop(1920, 1080);
+            plat.init("t", 1280, 720);
+            Settings s2;
+            s2.mode = DisplayMode::Windowed;
+            s2.width = 3840; s2.height = 2160;     // saved on a 4K monitor, not here
+            Game::fitWindowSizeToMonitor(s2, plat);
+            CHECK(s2.width == 1600 && s2.height == 900);
+            CHECK(Settings::isStandardResolution(s2.width, s2.height));
+            CHECK(Game::applyDisplayConfigTo(plat, Game::displayConfigOf(s2)));
+            CHECK(plat.width() == 1600 && plat.height() == 900);   // nothing clamped
+            // A standard size that still fits is kept as-is.
+            s2.width = 1280; s2.height = 720;
+            Game::fitWindowSizeToMonitor(s2, plat);
+            CHECK(s2.width == 1280 && s2.height == 720);
+            // Other modes are untouched (their window is the monitor).
+            s2.mode = DisplayMode::Borderless;
+            s2.width = 3840;
+            Game::fitWindowSizeToMonitor(s2, plat);
+            CHECK(s2.width == 3840);
+            plat.shutdown();
+        }
+
+        // A second change arriving while the user is still deciding is refused
+        // outright instead of stacking another dialog on top of the first.
+        const int hz0 = s.height;
+        s.width = 1600; s.height = 900;
+        CHECK(!g.requestDisplayApply());
+        CHECK(g.displayConfirmActive());
+        CHECK(dialogs == 1 && changes == 1);
+        s.width = w1; s.height = hz0;          // what the dialog is asking about
+        step(0);
+        CHECK(dialogs == 1);
+
+        // Confirm with Enter and keep it held for a while: the dialog closes
+        // once and the held key does not act on the menu below it.
+        step(0);                     // release Right
+        step(KEY_ENTER);             // confirm
+        CHECK(!g.displayConfirmActive());
+        for (int i = 0; i < 8; ++i) step(KEY_ENTER);
+        CHECK(changes == 1);         // no second change
+        CHECK(dialogs == 1);         // no second dialog
+        CHECK(s.width == w1);
+
+        // Releasing and pressing again really does change it (once).
+        step(0);
+        step(KEY_RIGHT);
+        CHECK(changes == 2);
+        CHECK(dialogs == 2);
+        CHECK(g.displayConfirmActive());
+
+        // Escape reverts that provisional change back to the confirmed state.
+        step(0);
+        step(KEY_ESC);
+        CHECK(changes == 3);                       // back to w1
+        CHECK(s.width == w1);
+        CHECK(!g.displayConfirmActive());
+        CHECK(g.stableDisplayConfig().width == w1);
+
+        // 20 idle frames do not produce another dialog or a hidden change.
+        for (int i = 0; i < 20; ++i) step(0);
+        CHECK(changes == 3 && dialogs == 2);
+        CHECK(!g.displayConfirmActive());
+        g.shutdown();
+    }
+
+    Settings::setPathForTests(nullptr);
+    if (!hadSettings) std::remove(kCfg);
+}
+
+// ---------------------------------------------------------------------------
+// Window centering math (the backends call this after every resize; they cannot
+// be exercised in CI, so the shared helper is covered here).
+static void testWindowCentering() {
+    WorkArea work;
+    work.x = 0; work.y = 0; work.width = 1920; work.height = 1040;   // taskbar
+    int x = 0, y = 0;
+    centerWindowIn(work, 1280, 720, x, y);
+    CHECK(x == 320 && y == 160);                       // exactly centered
+    centerWindowIn(work, 1600, 900, x, y);
+    CHECK(x == 160 && y == 70);
+    // Odd remainders round down, never off-screen.
+    centerWindowIn(work, 1281, 721, x, y);
+    CHECK(x == 319 && y == 159);
+    // A window as big as the work area (or bigger) is pinned inside it.
+    centerWindowIn(work, 1920, 1040, x, y);
+    CHECK(x == 0 && y == 0);
+    centerWindowIn(work, 2000, 1200, x, y);
+    CHECK(x == 0 && y == 0 && x + 2000 >= work.right() && y + 1200 >= work.bottom());
+    // A secondary monitor offset by its origin.
+    WorkArea second;
+    second.x = 1920; second.y = -200; second.width = 1600; second.height = 900;
+    centerWindowIn(second, 1280, 720, x, y);
+    CHECK(x == 1920 + 160 && y == -200 + 90);
+    // Degenerate input never produces a negative/garbage origin.
+    centerWindowIn(work, 0, 0, x, y);
+    CHECK(x == 0 && y == 0);
+    centerWindowIn(WorkArea{}, 1280, 720, x, y);
+    CHECK(x == 0 && y == 0);
+    // The window must always end up fully inside the usable area.
+    for (int w = 640; w <= 2600; w += 137) {
+        for (int h = 480; h <= 1600; h += 91) {
+            centerWindowIn(work, w, h, x, y);
+            CHECK(x >= work.x && y >= work.y);
+            if (w <= work.width) CHECK(x + w <= work.right());
+            if (h <= work.height) CHECK(y + h <= work.bottom());
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1333,6 +1542,8 @@ int main() {
     testSettingsModeNames();
     testRenderAspectFit();
     testDisplayModeLists();
+    testWindowCentering();
+    testDisplayConfirmOnce();
     testDisplayConfirm();
     testSensitivity();
     testMenuNav();
