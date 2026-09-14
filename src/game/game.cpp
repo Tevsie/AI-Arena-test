@@ -43,12 +43,38 @@ bool Game::init(const char* title, int width, int height, bool preferHeadless) {
         return false;
     }
 platformReady:;
-    if (settings_.fullscreen) {
-        platform_->setFullscreen(true);
-    } else {
+    {
+        // Apply the saved display configuration (windowed / borderless /
+        // exclusive fullscreen). A configuration the backend refuses — e.g. an
+        // exclusive mode that no longer exists on this display, or a machine
+        // without exclusive support — falls back to a fitting window instead of
+        // leaving the user with a black screen. The headless backend accepts
+        // everything, so the same code just validates the saved settings there
+        // and keeps the "last confirmed configuration" bookkeeping honest.
+        DisplayConfig cfg = displayConfigOf(settings_);
+        if (!applyDisplayConfig(cfg)) {
+            fprintf(stderr, "[aw] display config refused (%s) - falling back to windowed\n",
+                    displayModeName(cfg.mode));
+            settings_.mode = DisplayMode::Windowed;
+            fitWindowToMonitor();
+            cfg = displayConfigOf(settings_);
+            applyDisplayConfig(cfg);
+        }
         // The window may have opened on a different monitor than the primary
         // one: fit (and resize) again now that the backend knows its display.
         fitWindowToMonitor();
+        displayStable_ = cfg;
+        // A restored exclusive mode is provisional too: the display was switched
+        // before the user could see anything, so ask for confirmation. Until it
+        // is confirmed, the revert target is a plain window — otherwise the
+        // countdown would "revert" to the very mode it is asking about.
+        if (needsStartupConfirm(cfg.mode, headless())) {
+            displayStable_ = displayConfigOf(settings_);
+            displayStable_.mode = DisplayMode::Windowed;
+            char label[48];
+            describeDisplayConfig(cfg, label, sizeof(label));
+            displayConfirm_.begin(Settings::kDisplayConfirmSeconds, label);
+        }
     }
 
     float platformTop = seedWorld();
@@ -74,17 +100,168 @@ platformReady:;
     return true;
 }
 
+DisplayConfig Game::displayConfigOf(const Settings& s) {
+    DisplayConfig c;
+    c.mode = s.mode;
+    c.width = s.width; c.height = s.height;
+    c.renderWidth = s.renderWidth; c.renderHeight = s.renderHeight;
+    c.modeWidth = s.modeWidth; c.modeHeight = s.modeHeight;
+    c.modeRefresh = s.modeRefresh;
+    return c;
+}
+
+void Game::setDisplayConfig(Settings& s, const DisplayConfig& cfg) {
+    s.mode = cfg.mode;
+    s.width = cfg.width; s.height = cfg.height;
+    s.renderWidth = cfg.renderWidth; s.renderHeight = cfg.renderHeight;
+    s.modeWidth = cfg.modeWidth; s.modeHeight = cfg.modeHeight;
+    s.modeRefresh = cfg.modeRefresh;
+    s.clamp();
+}
+
+void describeDisplayConfig(const DisplayConfig& cfg, char* out, size_t n) {
+    switch (cfg.mode) {
+        case DisplayMode::Windowed:
+            std::snprintf(out, n, "WINDOW %dx%d", cfg.width, cfg.height);
+            break;
+        case DisplayMode::Borderless:
+            if (cfg.renderWidth > 0 && cfg.renderHeight > 0)
+                std::snprintf(out, n, "BORDERLESS RENDER %dx%d", cfg.renderWidth, cfg.renderHeight);
+            else
+                std::snprintf(out, n, "BORDERLESS NATIVE");
+            break;
+        case DisplayMode::Exclusive:
+        default:
+            if (cfg.modeRefresh > 0)
+                std::snprintf(out, n, "EXCLUSIVE %dx%d %dHZ", cfg.modeWidth, cfg.modeHeight,
+                              cfg.modeRefresh);
+            else
+                std::snprintf(out, n, "EXCLUSIVE %dx%d", cfg.modeWidth, cfg.modeHeight);
+            break;
+    }
+}
+
+bool Game::needsStartupConfirm(DisplayMode mode, bool headless) {
+    // Only a real, hardware-switched mode needs confirming at start-up: there is
+    // nothing to accept in a mode the backend never switched.
+    return mode == DisplayMode::Exclusive && !headless;
+}
+
+bool Game::applyDisplayConfigTo(Platform& p, const DisplayConfig& cfg) {
+    switch (cfg.mode) {
+        case DisplayMode::Windowed:
+            return p.applyDisplayMode(DisplayMode::Windowed, cfg.width, cfg.height, 0);
+        case DisplayMode::Borderless:
+            // The window is locked to the monitor's native resolution; the
+            // render resolution lives in the settings (see renderSizeFor).
+            return p.applyDisplayMode(DisplayMode::Borderless, 0, 0, 0);
+        case DisplayMode::Exclusive:
+        default:
+            return p.applyDisplayMode(DisplayMode::Exclusive, cfg.modeWidth,
+                                      cfg.modeHeight, cfg.modeRefresh);
+    }
+}
+
+bool Game::applyDisplayConfig(const DisplayConfig& cfg) {
+    if (!platform_) return false;
+    return applyDisplayConfigTo(*platform_, cfg);
+}
+
+// Called when the menu changed a display row: apply it provisionally and ask
+// the user to confirm (an unusable mode must never be saved silently).
+bool Game::requestDisplayApply() {
+    const DisplayConfig want = displayConfigOf(settings_);
+    if (want == displayStable_) return true;      // nothing to do
+    if (!applyDisplayConfig(want)) {
+        setDisplayConfig(settings_, displayStable_);   // refused: undo the edit
+        if (menuOpen_) menu_.setNotice("DISPLAY CHANGE NOT SUPPORTED");
+        fprintf(stderr, "[aw] display change refused, keeping %s\n",
+                displayModeName(displayStable_.mode));
+        return false;
+    }
+    char label[48];
+    describeDisplayConfig(want, label, sizeof(label));
+    displayConfirm_.begin(Settings::kDisplayConfirmSeconds, label, pendingHeldKeys_);
+    fprintf(stderr, "[aw] display change applied provisionally: %s\n", label);
+    return true;
+}
+
+// Drives the modal display-confirmation dialog. Returns true while it owns the
+// input (the menu and the Esc toggle are frozen). Keep persists the settings,
+// Escape/timeout restore the last confirmed configuration.
+bool Game::pollDisplayConfirm(const FrameInput& in, float dt) {
+    if (!displayConfirm_.active()) return false;
+    DisplayConfirm::Decision d = displayConfirm_.update(in, dt, platform_->uiScale());
+    if (d == DisplayConfirm::Keep) {
+        displayStable_ = displayConfigOf(settings_);
+        settings_.save();              // confirmed -> persist
+        fprintf(stderr, "[aw] display settings confirmed and saved\n");
+    } else if (d == DisplayConfirm::Revert) {
+        revertDisplayChange();
+    }
+    return true;
+}
+
+// The game loop hands the current keyboard state to a dialog it opens, so the
+// key that triggered the change cannot confirm it by accident.
+void Game::setPendingHeldKeys(const uint8_t* keys) {
+    if (keys) std::memcpy(pendingHeldKeys_, keys, sizeof(pendingHeldKeys_));
+    else std::memset(pendingHeldKeys_, 0, sizeof(pendingHeldKeys_));
+}
+
+void Game::revertDisplayChange() {
+    setDisplayConfig(settings_, displayStable_);
+    if (!applyDisplayConfig(displayStable_)) {
+        // Last resort: fall back to a plain window rather than stay in a mode
+        // this backend cannot leave.
+        settings_.mode = DisplayMode::Windowed;
+        fitWindowToMonitor();
+        applyDisplayConfig(displayConfigOf(settings_));
+        displayStable_ = displayConfigOf(settings_);
+    }
+    if (menuOpen_) menu_.setNotice("DISPLAY SETTINGS REVERTED");
+    settings_.save();              // the file follows the display again
+    fprintf(stderr, "[aw] display settings reverted\n");
+}
+
+// Internal 3D render resolution: the window size, except in borderless
+// fullscreen where the user picks a render resolution that is upscaled to the
+// screen (the UI always stays at the window resolution).
+void Game::renderSizeFor(int winW, int winH, int& rw, int& rh) const {
+    rw = winW;
+    rh = winH;
+    if (settings_.mode == DisplayMode::Borderless &&
+        settings_.renderWidth > 0 && settings_.renderHeight > 0) {
+        // The chosen render resolution keeps its pixel budget but adopts the
+        // window's aspect ratio, so the upscale never stretches the image.
+        Settings::fitRenderAspect(settings_.renderWidth, settings_.renderHeight, winW, winH, rw, rh);
+    }
+    if (rw < Settings::kMinWindowW) rw = Settings::kMinWindowW;
+    if (rh < Settings::kMinWindowH) rh = Settings::kMinWindowH;
+    if (rw > Settings::kMaxRenderW) rw = Settings::kMaxRenderW;
+    if (rh > Settings::kMaxRenderH) rh = Settings::kMaxRenderH;
+}
+
 // Snap the requested window size onto a size the monitor can actually show and
-// apply it. Windowed mode only (borderless fullscreen always covers the
-// monitor); a no-op when the backend cannot report a monitor (headless).
+// apply it. Windowed mode only (borderless/exclusive fullscreen always cover
+// the monitor); a no-op when the backend cannot report a monitor (headless).
 void Game::fitWindowToMonitor() {
-    if (!platform_ || settings_.fullscreen) return;
+    if (!platform_ || settings_.mode != DisplayMode::Windowed) return;
     int availW = 0, availH = 0;
     if (!platform_->maxWindowSize(availW, availH)) return;
     int w = settings_.width, h = settings_.height;
     settings_.fitToMonitor(availW, availH);
     if (settings_.width != w || settings_.height != h)
         platform_->resize(settings_.width, settings_.height);
+    // The borderless render resolution must be a supported entry too.
+    int nw = 0, nh = 0;
+    if (settings_.mode == DisplayMode::Borderless && platform_->monitorSize(nw, nh)) {
+        int rw = settings_.renderWidth, rh = settings_.renderHeight;
+        settings_.fitRenderToMonitor(nw, nh);
+        if (settings_.renderWidth != rw || settings_.renderHeight != rh)
+            fprintf(stderr, "[aw] render resolution fitted to %dx%d\n",
+                    settings_.renderWidth, settings_.renderHeight);
+    }
 }
 
 float Game::seedWorld() {
@@ -171,10 +348,15 @@ void Game::run() {
         bool alive = platform_->frame(in);
         if (!alive || in.shouldQuit) break;
 
+        // A provisional display change keeps the modal confirmation dialog on
+        // screen: no input confirms it, Escape/timeout reverts to the last
+        // confirmed configuration (see display_confirm.hpp).
+        const bool modalActive = pollDisplayConfirm(in, dt);
+
         // Esc toggles the settings menu (real window only: windowed or
         // fullscreen); the simulation pauses while it is open.
         bool esc = in.keys[KEY_ESC] != 0;
-        if (esc && !prevEsc_ && !headless()) {
+        if (esc && !prevEsc_ && !headless() && !modalActive) {
             menuOpen_ = !menuOpen_;
             if (menuOpen_) menu_.open();
             else settings_.save();
@@ -183,7 +365,11 @@ void Game::run() {
         prevEsc_ = esc;
 
         if (menuOpen_) {
-            menu_.update(in, settings_, audio_, *platform_);
+            // The dialog is modal: the menu stays visible but frozen below it.
+            if (!modalActive) menu_.update(in, settings_, audio_, *platform_);
+            setPendingHeldKeys(in.keys);
+            if (menu_.consumeDisplayApply()) requestDisplayApply();
+            setPendingHeldKeys(nullptr);
             // The menu can resize the window (resolution setting): pick the new
             // client size up right away so this frame renders the size the
             // window actually has.
@@ -223,13 +409,17 @@ void Game::run() {
             Vec3 eye = player_.eye();
             Mat4 view = Mat4::lookAt(eye, eye + player_.forward(), {0, 1, 0});
             Mat4 vp = proj * view;
+            int renderW = 0, renderH = 0;
+            renderSizeFor(in.width, in.height, renderW, renderH);   // render scaling
             stats_.drawnInstances = renderer_.render(wall_, player_, vp, aspect, in.width,
-                                                     in.height, fov, target_.hit);
-            if (menuOpen_) {
-                renderer_.uiBegin(in.width, in.height);
-                menu_.render(renderer_);
-                renderer_.uiEnd();
-            }
+                                                     in.height, renderW, renderH, fov);
+            // Overlays (crosshair, menu, modal dialog) always draw at the window
+            // resolution, so text stays crisp at any render scale.
+            renderer_.uiBegin(in.width, in.height);
+            renderer_.uiCrosshair(platform_->uiScale(), target_.hit);
+            if (menuOpen_) menu_.render(renderer_);
+            displayConfirm_.render(renderer_);
+            renderer_.uiEnd();
             platform_->swapBuffers();
         }
 

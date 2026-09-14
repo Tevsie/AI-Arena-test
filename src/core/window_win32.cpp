@@ -10,8 +10,19 @@
 // window is physically larger — which is what made a 1920x1080 request bigger
 // than a 1920x1080 screen and made clicks land away from the cursor. Being
 // DPI aware means client pixels are real screen pixels: window sizes, the GL
-// viewport and mouse coordinates all agree. Windowed sizes are additionally
-// clamped to the monitor's work area (screen minus taskbar and decorations).
+// viewport and mouse coordinates all agree.
+//
+// Display modes (see Platform::applyDisplayMode):
+//   Windowed   — WS_OVERLAPPEDWINDOW, client area clamped to the work area
+//                (screen minus taskbar and decorations) and re-centered on the
+//                monitor the window currently lives on.
+//   Borderless — WS_POPUP covering the monitor rect 1:1 at its native
+//                resolution; no display-mode switch.
+//   Exclusive  — EnumerateDisplaySettings reports the modes the driver
+//                supports; the requested one is applied with
+//                ChangeDisplaySettingsEx (resolution + refresh rate) and the
+//                window is put on top of it. The desktop mode is restored when
+//                leaving exclusive fullscreen or on shutdown.
 #include "platform.hpp"
 
 #if defined(_WIN32)
@@ -69,6 +80,9 @@ using PFNWGLCREATECONTEXTATTRIBSARBPROC = HGLRC(WINAPI*)(HDC, HGLRC, const int*)
 // Smallest window the settings allow (mirrors Settings::kMinWindow*).
 constexpr int kMinWindowW = 320;
 constexpr int kMinWindowH = 200;
+// Driver display modes kept for the exclusive-fullscreen picker.
+constexpr int kMaxDriverModes = 256;
+constexpr int kMinModeW = 640, kMinModeH = 400;
 
 // ---- Dynamic entry points (post-Windows-7 APIs) ----------------------------
 using SetProcessDpiAwarenessContextFn = BOOL(WINAPI*)(HANDLE);
@@ -234,12 +248,16 @@ public:
             return false;
         }
 
+        // Apply whatever mode the game requested before the window existed.
+        if (pendingMode_ != mode_) applyDisplayMode(pendingMode_, pendingW_, pendingH_, 0);
+
         ShowWindow(hwnd_, SW_SHOW);
         UpdateWindow(hwnd_);
         // Adopt the size Windows actually gave the client area (DPI rounding).
         syncClientSize();
-        fprintf(stderr, "[aw] window: %dx%d client at %d,%d (dpi %d)\n",
-                width_, height_, x, y, windowDpi());
+        refreshMonitorInfo();
+        fprintf(stderr, "[aw] window: %dx%d client at %d,%d (dpi %d, desktop %dx%d)\n",
+                width_, height_, x, y, windowDpi(), desktopW_, desktopH_);
         fprintf(stderr, "[aw] renderer: %s | %s | GLSL %s\n",
                 gl.GetString ? (const char*)gl.GetString(GL_RENDERER) : "?",
                 gl.GetString ? (const char*)gl.GetString(GL_VERSION) : "?",
@@ -276,6 +294,10 @@ public:
 
     void shutdown() override {
         setCursorCaptured(false);
+        // Never leave the desktop in a mode we switched to (Windows would also
+        // restore it on exit, but this keeps multi-monitor setups tidy).
+        if (mode_ == DisplayMode::Exclusive) restoreDesktopMode();
+        mode_ = DisplayMode::Windowed;
         if (hrc_) { wglMakeCurrent(nullptr, nullptr); wglDeleteContext(hrc_); hrc_ = nullptr; }
         if (hdc_ && hwnd_) ReleaseDC(hwnd_, hdc_);
         hdc_ = nullptr;
@@ -320,7 +342,7 @@ public:
 
     void resize(int w, int h) override {
         if (w <= 0 || h <= 0) return;
-        if (fullscreen_) return;   // borderless fullscreen always fills the monitor
+        if (mode_ != DisplayMode::Windowed) { pendingW_ = w; pendingH_ = h; return; }
         // Clamp to what the monitor can show: a windowed window must never be
         // bigger than the screen (the resolution setting asks for a preset, the
         // monitor decides how much of it fits).
@@ -330,54 +352,86 @@ public:
             if (h > maxH) h = maxH;
         }
         width_ = w; height_ = h;
+        pendingW_ = w; pendingH_ = h;
         if (!hwnd_) return;   // before init(): remembered for CreateWindow
 
+        // Re-center on the monitor the window currently lives on.
         int fw = 0, fh = 0;
         frameSize(windowDpi(), fw, fh);
-        RECT wr{};
-        if (!GetWindowRect(hwnd_, &wr)) { wr.left = 0; wr.top = 0; }
-        RECT target{wr.left, wr.top, wr.left + w + fw, wr.top + h + fh};
-        clampWindowRect(target);
-        SetWindowPos(hwnd_, nullptr, target.left, target.top,
-                     target.right - target.left, target.bottom - target.top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        int x = 0, y = 0;
+        centerWindowOnMonitor(w + fw, h + fh, x, y);
+        SetWindowPos(hwnd_, nullptr, x, y, w + fw, h + fh, SWP_NOZORDER | SWP_NOACTIVATE);
         // Apply immediately so this frame already renders the new size (the
         // asynchronous WM_SIZE confirms it afterwards).
         syncClientSize();
         keepCursorInside();
     }
 
-    void setFullscreen(bool on) override {
-        if (fullscreen_ == on) return;
-        fullscreen_ = on;
-        if (!hwnd_) return;
-        if (on) {
-            // Borderless window covering the current monitor (WM_SIZE syncs w/h).
-            GetWindowRect(hwnd_, &savedRect_);
-            savedStyle_ = GetWindowLongA(hwnd_, GWL_STYLE);
-            SetWindowLongA(hwnd_, GWL_STYLE, (savedStyle_ & ~WS_OVERLAPPEDWINDOW) | WS_POPUP);
-            MONITORINFO mi{};
-            mi.cbSize = sizeof(mi);
-            if (GetMonitorInfoA(monitor(), &mi)) {
-                SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
-                             mi.rcMonitor.right - mi.rcMonitor.left,
-                             mi.rcMonitor.bottom - mi.rcMonitor.top,
-                             SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    // ---- display modes -----------------------------------------------------
+
+    bool applyDisplayMode(DisplayMode mode, int w, int h, int refreshHz) override {
+        pendingMode_ = mode;
+        pendingW_ = w > 0 ? w : pendingW_;
+        pendingH_ = h > 0 ? h : pendingH_;
+        if (!hwnd_) return true;    // remembered; applied during init()
+
+        switch (mode) {
+            case DisplayMode::Windowed: {
+                restoreDesktopMode();          // undo an exclusive switch first
+                setBorderless(false);
+                mode_ = DisplayMode::Windowed;
+                refreshMonitorInfo();
+                resize(w > 0 ? w : width_, h > 0 ? h : height_);
+                return true;
             }
-            syncClientSize();
-        } else {
-            SetWindowLongA(hwnd_, GWL_STYLE, savedStyle_);
-            RECT r = savedRect_;
-            if (r.right <= r.left || r.bottom <= r.top) {
-                RECT cur{};
-                if (GetWindowRect(hwnd_, &cur)) r = cur;
+            case DisplayMode::Borderless: {
+                restoreDesktopMode();
+                mode_ = DisplayMode::Borderless;
+                refreshMonitorInfo();
+                setBorderless(true);
+                fillMonitorRect();
+                return true;
             }
-            clampWindowRect(r);
-            SetWindowPos(hwnd_, nullptr, r.left, r.top, r.right - r.left, r.bottom - r.top,
-                         SWP_FRAMECHANGED | SWP_NOZORDER | SWP_NOOWNERZORDER);
-            ShowWindow(hwnd_, SW_RESTORE);
-            syncClientSize();
+            case DisplayMode::Exclusive:
+            default: {
+                DEVMODEA dm{};
+                if (!findDriverMode(w, h, refreshHz, dm)) {
+                    fprintf(stderr, "[aw] display mode %dx%d@%dHz not supported by the driver\n",
+                            w, h, refreshHz);
+                    if (mode_ != DisplayMode::Exclusive) restoreDesktopMode();
+                    return false;
+                }
+                if (!switchDisplayMode(dm)) {
+                    restoreDesktopMode();
+                    return false;
+                }
+                mode_ = DisplayMode::Exclusive;
+                desktopW_ = int(dm.dmPelsWidth);    // keep the cache coherent while
+                desktopH_ = int(dm.dmPelsHeight);   // we are in the switched mode
+                setBorderless(true);
+                fillMonitorRect();
+                fprintf(stderr, "[aw] exclusive fullscreen %lux%lu @ %luHz\n",
+                        (unsigned long)dm.dmPelsWidth, (unsigned long)dm.dmPelsHeight,
+                        (unsigned long)dm.dmDisplayFrequency);
+                return true;
+            }
         }
+    }
+
+    DisplayMode currentDisplayMode() const override { return mode_; }
+
+    bool monitorSize(int& w, int& h) const override {
+        w = desktopW_; h = desktopH_;
+        return w > 0 && h > 0;
+    }
+
+    int displayModeCount() const override { return enumerateModes(); }
+
+    bool displayModeAt(int index, DisplayModeInfo& out) const override {
+        int n = enumerateModes();
+        if (index < 0 || index >= n) return false;
+        out = modeCache_[index];
+        return true;
     }
 
     bool maxWindowSize(int& w, int& h) const override {
@@ -397,13 +451,6 @@ public:
         return true;
     }
 
-    // Scaled displays: the menu must grow with the DPI (before this backend
-    // was DPI aware, Windows did that scaling for us — blurrily — and the
-    // fixed-pixel menu would now look half-size on a 200 % display).
-    float uiScale() const override {
-        return quantizeUiScale(float(windowDpi()) / 96.0f);
-    }
-
     bool clientSize(int& w, int& h) const override {
         if (hwnd_) {
             RECT cr{};
@@ -415,6 +462,13 @@ public:
         }
         w = width_; h = height_;
         return w > 0 && h > 0;
+    }
+
+    // Scaled displays: the menu must grow with the DPI (before this backend
+    // was DPI aware, Windows did that scaling for us — blurrily — and the
+    // fixed-pixel menu would now look half-size on a 200 % display).
+    float uiScale() const override {
+        return quantizeUiScale(float(windowDpi()) / 96.0f);
     }
 
     void* loadGLProc(const char* name) override {
@@ -439,7 +493,138 @@ private:
         return SetPixelFormat(hdc_, pf, &pfd) != FALSE;
     }
 
+    // ---- display-mode helpers ----------------------------------------------
+    // Driver modes for the window's monitor (cached; recomputed after a display
+    // change or a mode switch).
+    int enumerateModes() const {
+        if (modeCacheCount_ >= 0) return modeCacheCount_;
+        modeCacheCount_ = 0;
+        const char* dev = deviceName_[0] ? deviceName_ : nullptr;
+        DEVMODEA dm{};
+        dm.dmSize = sizeof(dm);
+        for (DWORD i = 0; EnumDisplaySettingsExA(dev, i, &dm, 0); ++i) {
+            if (dm.dmPelsWidth < kMinModeW || dm.dmPelsHeight < kMinModeH) continue;
+            if (dm.dmBitsPerPel != 0 && dm.dmBitsPerPel < 24) continue;
+            DisplayModeInfo m;
+            m.width = int(dm.dmPelsWidth);
+            m.height = int(dm.dmPelsHeight);
+            m.refreshHz = int(dm.dmDisplayFrequency > 1 ? dm.dmDisplayFrequency : 0);
+            bool dup = false;
+            for (int j = 0; j < modeCacheCount_; ++j) {
+                if (modeCache_[j].width == m.width && modeCache_[j].height == m.height &&
+                    modeCache_[j].refreshHz == m.refreshHz) { dup = true; break; }
+            }
+            if (dup || modeCacheCount_ >= kMaxDriverModes) continue;
+            modeCache_[modeCacheCount_++] = m;
+        }
+        // Ascending by area, then by refresh rate.
+        for (int i = 1; i < modeCacheCount_; ++i) {
+            DisplayModeInfo key = modeCache_[i];
+            int j = i - 1;
+            while (j >= 0 && (modeCache_[j].width * modeCache_[j].height >
+                                  key.width * key.height ||
+                              (modeCache_[j].width * modeCache_[j].height ==
+                                   key.width * key.height &&
+                               modeCache_[j].refreshHz > key.refreshHz))) {
+                modeCache_[j + 1] = modeCache_[j];
+                --j;
+            }
+            modeCache_[j + 1] = key;
+        }
+        return modeCacheCount_;
+    }
+
+    // DEVMODE for `w x h` (and `hz` when > 0; otherwise the highest refresh).
+    bool findDriverMode(int w, int h, int hz, DEVMODEA& out) const {
+        int n = enumerateModes();
+        int best = -1;
+        for (int i = 0; i < n; ++i) {
+            if (modeCache_[i].width != w || modeCache_[i].height != h) continue;
+            if (hz > 0 && modeCache_[i].refreshHz != hz) continue;
+            if (hz <= 0 && best >= 0 && modeCache_[best].refreshHz >= modeCache_[i].refreshHz)
+                continue;
+            best = i;
+        }
+        if (best < 0) return false;
+        const char* dev = deviceName_[0] ? deviceName_ : nullptr;
+        // Re-enumerate to get the full DEVMODE for the chosen entry.
+        DEVMODEA dm{};
+        dm.dmSize = sizeof(dm);
+        for (DWORD i = 0; EnumDisplaySettingsExA(dev, i, &dm, 0); ++i) {
+            if (int(dm.dmPelsWidth) != modeCache_[best].width ||
+                int(dm.dmPelsHeight) != modeCache_[best].height)
+                continue;
+            if (dm.dmDisplayFrequency != DWORD(modeCache_[best].refreshHz)) continue;
+            out = dm;
+            return true;
+        }
+        return false;
+    }
+
+    bool switchDisplayMode(const DEVMODEA& dm) {
+        const char* dev = deviceName_[0] ? deviceName_ : nullptr;
+        DEVMODEA want = dm;
+        want.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | DM_DISPLAYFREQUENCY;
+        LONG r = ChangeDisplaySettingsExA(dev, &want, nullptr, CDS_FULLSCREEN, nullptr);
+        if (r != DISP_CHANGE_SUCCESSFUL) {
+            fprintf(stderr, "[aw] ChangeDisplaySettingsEx failed (%ld)\n", (long)r);
+            return false;
+        }
+        modeCacheCount_ = -1;
+        return true;
+    }
+
+    void restoreDesktopMode() {
+        if (mode_ != DisplayMode::Exclusive) return;
+        const char* dev = deviceName_[0] ? deviceName_ : nullptr;
+        ChangeDisplaySettingsExA(dev, nullptr, nullptr, 0, nullptr);   // registry mode
+        modeCacheCount_ = -1;
+        mode_ = DisplayMode::Windowed;   // the caller re-applies the real one
+        // The desktop size is restored: re-read it.
+        refreshMonitorInfo();
+    }
+
+    void setBorderless(bool borderless) {
+        LONG_PTR style = GetWindowLongPtrA(hwnd_, GWL_STYLE);
+        if (borderless) {
+            if (!(style & WS_POPUP)) savedStyle_ = LONG(style);
+            style = (style & ~(LONG_PTR)WS_OVERLAPPEDWINDOW) | WS_POPUP;
+        } else {
+            LONG base = savedStyle_ ? savedStyle_ : LONG(style);
+            style = (base & ~(LONG_PTR)WS_POPUP) | WS_OVERLAPPEDWINDOW;
+        }
+        SetWindowLongPtrA(hwnd_, GWL_STYLE, style);
+    }
+
+    // Put the window exactly over its monitor's rectangle (borderless /
+    // exclusive fullscreen: 1:1 with the display, no borders).
+    void fillMonitorRect() {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoA(monitor(), &mi)) return;
+        SetWindowPos(hwnd_, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+        syncClientSize();
+        keepCursorInside();
+    }
+
     // ---- DPI / monitor helpers ---------------------------------------------
+    void refreshMonitorInfo() {
+        if (mode_ == DisplayMode::Exclusive) return;   // keep the desktop cache
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        HMONITOR mon = monitor();
+        if (!mon || !GetMonitorInfoA(mon, &mi)) return;
+        desktopW_ = int(mi.rcMonitor.right - mi.rcMonitor.left);
+        desktopH_ = int(mi.rcMonitor.bottom - mi.rcMonitor.top);
+        if (mi.szDevice[0]) {
+            std::snprintf(deviceName_, sizeof(deviceName_), "%s", mi.szDevice);
+            modeCacheCount_ = -1;   // modes belong to a device
+        }
+    }
+
     // DPI of the window's monitor (or of the system, before the window exists).
     int windowDpi() const {
         const WinApi& api = winApi();
@@ -485,7 +670,25 @@ private:
         return MonitorFromPoint(origin, MONITOR_DEFAULTTOPRIMARY);
     }
 
-    // Centre a window of `winW x winH` on the primary monitor's work area.
+    // Centre a window of `winW x winH` on the monitor the window is on (the
+    // requirement: a resized window is re-centered on the active monitor).
+    void centerWindowOnMonitor(int winW, int winH, int& x, int& y) const {
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!GetMonitorInfoA(monitor(), &mi)) {
+            x = CW_USEDEFAULT; y = CW_USEDEFAULT;
+            return;
+        }
+        const RECT& wa = mi.rcWork;
+        int availW = wa.right - wa.left, availH = wa.bottom - wa.top;
+        x = wa.left + (availW - winW) / 2;
+        y = wa.top + (availH - winH) / 2;
+        if (x + winW > wa.right) x = wa.right - winW;
+        if (y + winH > wa.bottom) y = wa.bottom - winH;
+        if (x < wa.left) x = wa.left;
+        if (y < wa.top) y = wa.top;
+    }
+
     void centerOnPrimaryMonitor(int winW, int winH, int& x, int& y) const {
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);
@@ -581,9 +784,9 @@ private:
                 return 0;
             case WM_DPICHANGED: {
                 // Per-monitor DPI awareness: adopt the size Windows suggests for
-                // the new scale factor (windowed mode only; borderless
-                // fullscreen covers the monitor either way).
-                if (!fullscreen_) {
+                // the new scale factor (windowed mode only; borderless and
+                // exclusive fullscreen cover the monitor either way).
+                if (mode_ == DisplayMode::Windowed) {
                     const RECT* sug = reinterpret_cast<const RECT*>(lp);
                     if (sug && sug->right > sug->left && sug->bottom > sug->top) {
                         RECT r = *sug;
@@ -597,10 +800,16 @@ private:
             }
             case WM_DISPLAYCHANGE:
                 // Monitor layout/resolution changed (undocked laptop, scaled
-                // display, taskbar resized): keep the window fully on screen.
-                // A maximized window is Windows' own business — it re-fits it —
+                // display, taskbar resized): the driver mode list and the
+                // desktop size may both be different now.
+                modeCacheCount_ = -1;
+                refreshMonitorInfo();
+                // Fullscreen presentations are re-fitted to the monitor; a
+                // maximized window is Windows' own business — it re-fits it —
                 // and un-maximizing it here would be a rude surprise.
-                if (!fullscreen_) {
+                if (mode_ == DisplayMode::Borderless) {
+                    fillMonitorRect();
+                } else if (mode_ == DisplayMode::Windowed) {
                     if (!IsZoomed(hwnd_) && width_ > 0 && height_ > 0) resize(width_, height_);
                     else syncClientSize();
                 }
@@ -627,9 +836,16 @@ private:
     int mouseX_ = 0, mouseY_ = 0;
     int centerX_ = 0, centerY_ = 0, screenCX_ = 0, screenCY_ = 0;
     bool captured_ = false, shouldQuit_ = false;
-    bool fullscreen_ = false;
+    // Display state.
+    DisplayMode mode_ = DisplayMode::Windowed;
+    DisplayMode pendingMode_ = DisplayMode::Windowed;   // requested before init()
+    int pendingW_ = 0, pendingH_ = 0;
+    char deviceName_[32]{};
+    int desktopW_ = 0, desktopH_ = 0;
     RECT savedRect_{};
     LONG savedStyle_ = 0;
+    mutable DisplayModeInfo modeCache_[kMaxDriverModes]{};
+    mutable int modeCacheCount_ = -1;
 };
 
 Platform* createPlatform() { return new PlatformWin32(); }

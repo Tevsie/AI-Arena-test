@@ -9,6 +9,7 @@
 #include "../core/platform.hpp"
 #include "../render/renderer.hpp"
 #include "constants.hpp"
+#include "display_confirm.hpp"
 #include "interaction.hpp"
 #include "menu.hpp"
 #include "player.hpp"
@@ -29,6 +30,26 @@ struct FrameStats {
     int32_t playerBrickY = 0;
 };
 
+// The display-related part of Settings: what a display change actually toggles.
+// Kept as a value so a change can be applied provisionally and reverted exactly.
+struct DisplayConfig {
+    DisplayMode mode = DisplayMode::Windowed;
+    int width = 1280, height = 720;                    // windowed client size
+    int renderWidth = 0, renderHeight = 0;             // borderless render resolution
+    int modeWidth = 0, modeHeight = 0, modeRefresh = 0; // exclusive display mode
+
+    bool operator==(const DisplayConfig& o) const {
+        return mode == o.mode && width == o.width && height == o.height &&
+               renderWidth == o.renderWidth && renderHeight == o.renderHeight &&
+               modeWidth == o.modeWidth && modeHeight == o.modeHeight &&
+               modeRefresh == o.modeRefresh;
+    }
+    bool operator!=(const DisplayConfig& o) const { return !(*this == o); }
+};
+
+// Human-readable description of a configuration (embedded font: no brackets).
+void describeDisplayConfig(const DisplayConfig& cfg, char* out, size_t n);
+
 class Game {
 public:
     // `preferHeadless` skips the windowed backend entirely (CI / benchmark).
@@ -46,6 +67,31 @@ public:
     void restart();
 
     FrameStats stats() const { return stats_; }
+
+    // Display mode plumbing (exposed for tests).
+    static DisplayConfig displayConfigOf(const Settings& s);
+    static void setDisplayConfig(Settings& s, const DisplayConfig& cfg);
+    // Applies a configuration to the backend; false when it is refused.
+    bool applyDisplayConfig(const DisplayConfig& cfg);
+    // Same, for an explicitly supplied backend (used by the tests).
+    static bool applyDisplayConfigTo(Platform& p, const DisplayConfig& cfg);
+    // A restored exclusive mode must be confirmed by the user before it counts
+    // as the stable configuration (see init()).
+    static bool needsStartupConfirm(DisplayMode mode, bool headless);
+    // Applies the pending display settings and starts the confirm dialog.
+    // Returns false when the backend refused the change (settings are restored).
+    bool requestDisplayApply();
+    // Restores the last confirmed configuration (dialog timeout / Esc).
+    void revertDisplayChange();
+    // Runs the modal confirmation dialog for one frame; true while it is active
+    // (it then owns the input). Called by the main loop.
+    bool pollDisplayConfirm(const FrameInput& in, float dt);
+    // Key state used when the confirm dialog opens (see DisplayConfirm::begin).
+    void setPendingHeldKeys(const uint8_t* keys);
+    bool displayConfirmActive() const { return displayConfirm_.active(); }
+    const DisplayConfig& stableDisplayConfig() const { return displayStable_; }
+    // Internal 3D render resolution for a window of w x h (render scaling).
+    void renderSizeFor(int winW, int winH, int& rw, int& rh) const;
 
     // Headless/demo mode flag.
     bool headless() const { return !platform_->info().hasGL; }
@@ -71,6 +117,11 @@ private:
     Audio audio_;
     Menu menu_;
     FrameStats stats_;
+    // Display state: the last configuration the user confirmed, plus the modal
+    // dialog shown while a new one is provisional.
+    DisplayConfig displayStable_;
+    DisplayConfirm displayConfirm_;
+    uint8_t pendingHeldKeys_[512]{};
 
     double lastTime_ = 0.0;
     ChunkCoord lastChunk_{0, 0};

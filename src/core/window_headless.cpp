@@ -40,9 +40,21 @@ public:
     void resize(int w, int h) override {
         if (w > 0 && h > 0) { width_ = w; height_ = h; }
     }
-    void setFullscreen(bool) override {}
+    // Headless has no display: every mode is accepted as a no-op so that a
+    // saved configuration never fails in tests/CI (nothing is switched, and the
+    // settings file is left untouched).
+    bool applyDisplayMode(DisplayMode mode, int w, int h, int) override {
+        mode_ = mode;
+        // The windowed size is an internal property here (there is no monitor);
+        // borderless/exclusive keep whatever size the run was started with.
+        if (mode == DisplayMode::Windowed && w > 0 && h > 0) { width_ = w; height_ = h; }
+        return true;
+    }
+    DisplayMode currentDisplayMode() const override { return mode_; }
     // No monitor to query: headless runs keep whatever size they were given.
     bool maxWindowSize(int& w, int& h) const override { w = 0; h = 0; return false; }
+    bool monitorSize(int& w, int& h) const override { w = 0; h = 0; return false; }
+    int displayModeCount() const override { return 0; }
     bool clientSize(int& w, int& h) const override { w = width_; h = height_; return true; }
     BackendInfo info() const override {
         BackendInfo b;
@@ -57,6 +69,7 @@ public:
     int frameCount() const { return frame_; }
 
 private:
+    DisplayMode mode_ = DisplayMode::Windowed;
     int width_ = 1280, height_ = 720;
     int frame_ = 0;
     int maxFrames_ = kHeadlessMaxFramesDefault;
