@@ -1,0 +1,14 @@
+src/core/window_win32.cpp: In member function ‘virtual bool aw::PlatformWin32::init(const char*, int, int)’:
+src/core/window_win32.cpp:217:13: warning: cast between incompatible function types from ‘PROC’ {aka ‘long long int (*)()’} to ‘aw::{anonymous}::PFNWGLCREATECONTEXTATTRIBSARBPROC’ {aka ‘HGLRC__* (*)(HDC__*, HGLRC__*, const int*)’} [-Wcast-function-type]
+  217 |             reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  218 |                 wglGetProcAddress("wglCreateContextAttribsARB"));
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+src/core/window_win32.cpp: In member function ‘void aw::PlatformWin32::refreshMonitorInfo()’:
+src/core/window_win32.cpp:622:16: error: ‘MONITORINFO’ {aka ‘struct tagMONITORINFO’} has no member named ‘szDevice’
+  622 |         if (mi.szDevice[0]) {
+      |                ^~~~~~~~
+src/core/window_win32.cpp:623:70: error: ‘MONITORINFO’ {aka ‘struct tagMONITORINFO’} has no member named ‘szDevice’
+  623 |             std::snprintf(deviceName_, sizeof(deviceName_), "%s", mi.szDevice);
+      |                                                                      ^~~~~~~~
+exit=1
