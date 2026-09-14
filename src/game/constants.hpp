@@ -55,9 +55,9 @@ constexpr float GROUND_FRICTION = 12.0f;
 constexpr float TERMINAL_VELOCITY = 46.0f;
 constexpr float SNAP_DIST = 0.18f;        // ground snap distance (sticky feel)
 
-// Camera
+// Camera. The vertical field of view is a user setting now (Settings::fov,
+// default / range in settings.hpp), so only the fixed clip planes live here.
 constexpr float MOUSE_SENS = 0.0022f;
-constexpr float FOV_DEG = 75.0f;
 constexpr float NEAR_PLANE = 0.06f;
 constexpr float FAR_PLANE = 320.0f;
 

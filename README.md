@@ -31,7 +31,7 @@ code is pushed.
 > `atw.exe` is fully self-contained (x64, no install). It needs a standard
 > Windows 10/11 GPU driver with **OpenGL 3.3** support (any Intel / NVIDIA /
 > AMD driver). If SmartScreen warns on first run, click **More info →
-> Run anyway**. Press `Esc` for the settings menu (volume, resolution, fullscreen,
+> Run anyway**. Press `Esc` for the settings menu (volume, display mode, resolution,
 > sensitivity, restart, quit).
 
 ### Build the .exe yourself on Windows (optional)
@@ -101,11 +101,43 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 | Setting              | What it does                                              |
 |----------------------|-----------------------------------------------------------|
 | Master volume bar    | 0–100 % loudness for all procedural sound effects         |
-| Resolution           | Window size: 1280×720 / 1600×900 / 1920×1080 / 2560×1440  |
+| Display mode         | `WINDOWED` / `BORDERLESS` / `EXCLUSIVE` fullscreen        |
+| Resolution           | Depends on the mode — see *Display modes* below           |
+| Refresh rate         | Exclusive fullscreen only: the rates your driver reports  |
+| Field of view        | Vertical FOV, 55–110° (default 75°)                       |
 | Mouse sensitivity    | Look speed multiplier, 10–300 % (default 100 %)            |
-| Fullscreen           | Borderless fullscreen toggle (`ON` / `OFF`)               |
 | **Restart** button   | Clears all brick edits and respawns you on a fresh wall   |
 | Resume / Quit        | Close the menu / exit the game                            |
+
+### Display modes
+
+| Mode           | Window                                | Resolution row                                    |
+|----------------|---------------------------------------|---------------------------------------------------|
+| `WINDOWED`     | Real window with borders, client area = the selected size, re-centred on the monitor **every time you change the resolution** | Window **client size** — always a standard size: 1280×720 (HD), 1600×900 (HD+), 1920×1080 (Full HD), 2560×1440 (QHD), 3840×2160 (4K), filtered to what your screen can show. A leftover non-standard value from an older version (e.g. 1003×986) is snapped to the largest standard size that fits |
+| `BORDERLESS`   | Borderless window covering the whole monitor at its native resolution (no mode switch, instant `Alt+Tab`) | **Render resolution**: the 3D scene is drawn at this size and upscaled to the window; the UI, menu and crosshair always render at native window resolution, so text stays crisp. The chosen preset keeps its pixel budget but takes the monitor's shape, so upscaling never stretches the image |
+| `EXCLUSIVE`    | Driver mode switch (`ChangeDisplaySettingsEx` / XRandR): real hardware resolution + refresh rate | Strictly the modes your driver reports for this display (lowest → highest) |
+
+Every apply is **confirmed before it sticks**: a modal asks *"Keep these display
+settings? Reverting in 15 s"* — `Enter`/`Space`/click **KEEP** saves it to
+`settings.cfg`; `Esc`, the timeout, or **REVERT** instantly restore the last
+confirmed configuration (a restored exclusive mode at startup is provisional
+too), so a mode your monitor cannot show can never leave you with a black
+screen. One action is one dialog: the confirmation appears once per change (the
+key that dismisses it cannot immediately repeat the change underneath), and no
+new change can start while the countdown is running.
+
+Windowed mode always fits your monitor: the picker only offers standard sizes
+that the work area (screen minus taskbar and window decorations) can really
+show, a saved `settings.cfg` size is fitted down at startup, and the window is
+re-fitted — and re-centred — if you move it to another display, change the
+desktop resolution, or pick another size (a maximized window is restored first,
+because a maximized window cannot be sized or moved). On Windows the process declares
+per-monitor DPI awareness *before* the window is created, so the client area,
+the GL viewport and the mouse coordinates are all in real screen pixels —
+otherwise a scaled (125 %/150 %) display makes windows physically larger than
+the screen and makes clicks land away from the cursor. The settings menu uses
+that same DPI to scale itself (1× / 1.5× / 2×, shrinking back if it would not
+fit the window) so it keeps its apparent size on high-DPI displays.
 
 Settings apply instantly and persist to `settings.cfg` next to the executable.
 Sound effects (brick pull/push, jump, land, UI clicks) are synthesized live —
@@ -158,7 +190,8 @@ src/
                  font.hpp (embedded 5x7 menu font)
   game/          constants, grid/chunk/wall (streaming + brick store),
                  player (kinematic controller), interaction (raycast pull/push),
-                 settings (volume/resolution/sensitivity/fullscreen + persistence),
+                 settings (display modes + render scaling, FOV, sensitivity,
+                 persistence), display_confirm (15 s keep-or-revert modal),
                  menu (pause/settings overlay), game.cpp (loop + demo driver)
   audio/         procedural SFX mixer + synth, WinMM / PulseAudio / ALSA backends
 tests/           dependency-free unit tests (grid, store, streaming,

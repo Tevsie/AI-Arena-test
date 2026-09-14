@@ -106,6 +106,21 @@ void main() {
 }
 )GLSL";
 
+// Upscale blit: draws the offscreen 3D target over the whole window, sampling
+// it with linear filtering (render-resolution scaling). gl_FragCoord is in the
+// destination resolution, so no vertex attributes beyond the fullscreen
+// triangle are needed; GL's bottom-left origin is shared by both, no flip.
+const char* kBlitFS = R"GLSL(
+#version 330 core
+uniform sampler2D uTex;
+uniform vec2 uRes;      // destination size (window pixels)
+out vec4 fragColor;
+void main() {
+    vec2 uv = gl_FragCoord.xy / uRes;
+    fragColor = vec4(texture(uTex, uv).rgb, 1.0);
+}
+)GLSL";
+
 // UI rect: unit quad (0..1) mapped to a pixel rect (top-left origin).
 const char* kUiRectVS = R"GLSL(
 #version 330 core
@@ -279,6 +294,11 @@ bool Renderer::init() {
     uiRectProg_ = link(kUiRectVS, kUiRectFS);
     uiTextProg_ = link(kUiTextVS, kUiTextFS);
     if (!uiRectProg_ || !uiTextProg_) return false;
+    if (gl.hasFBO) {
+        blitProg_ = link(kFullVS, kBlitFS);
+        blitRes_ = gl.GetUniformLocation(blitProg_, "uRes");
+        blitTex_ = gl.GetUniformLocation(blitProg_, "uTex");
+    }
     uiRectRes_ = gl.GetUniformLocation(uiRectProg_, "uRes");
     uiRectDst_ = gl.GetUniformLocation(uiRectProg_, "uDst");
     uiRectCol_ = gl.GetUniformLocation(uiRectProg_, "uColor");
@@ -332,6 +352,8 @@ void Renderer::shutdown() {
     if (crosshairProg_) gl.DeleteProgram(crosshairProg_);
     if (uiRectProg_) gl.DeleteProgram(uiRectProg_);
     if (uiTextProg_) gl.DeleteProgram(uiTextProg_);
+    if (blitProg_) gl.DeleteProgram(blitProg_);
+    releaseSceneTarget();
     if (cubeVBO_) gl.DeleteBuffers(1, &cubeVBO_);
     if (instVBO_) gl.DeleteBuffers(1, &instVBO_);
     if (fullVBO_) gl.DeleteBuffers(1, &fullVBO_);
@@ -342,18 +364,94 @@ void Renderer::shutdown() {
     if (uiRectVAO_) gl.DeleteVertexArrays(1, &uiRectVAO_);
     if (uiTextVAO_) gl.DeleteVertexArrays(1, &uiTextVAO_);
     if (fontTex_) gl.DeleteTextures(1, &fontTex_);
-    brickProg_ = skyProg_ = crosshairProg_ = uiRectProg_ = uiTextProg_ = 0;
+    brickProg_ = skyProg_ = crosshairProg_ = uiRectProg_ = uiTextProg_ = blitProg_ = 0;
     cubeVBO_ = instVBO_ = fullVBO_ = uiRectVBO_ = uiTextVBO_ = 0;
     cubeVAO_ = fullVAO_ = uiRectVAO_ = uiTextVAO_ = fontTex_ = 0;
     ready_ = false;
 }
 
+// ---- render-resolution scaling: offscreen 3D target ------------------------
+bool Renderer::ensureSceneTarget(int w, int h) {
+    if (!gl.hasFBO || w <= 0 || h <= 0) return false;
+    if (sceneReady_ && sceneW_ == w && sceneH_ == h) return true;
+    releaseSceneTarget();
+
+    gl.GenTextures(1, &sceneColor_);
+    gl.BindTexture(GL_TEXTURE_2D, sceneColor_);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    gl.GenTextures(1, &sceneDepth_);
+    gl.BindTexture(GL_TEXTURE_2D, sceneDepth_);
+    gl.TexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, w, h, 0,
+                  GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    gl.TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    gl.GenFramebuffers(1, &sceneFBO_);
+    gl.BindFramebuffer(GL_FRAMEBUFFER, sceneFBO_);
+    gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sceneColor_, 0);
+    gl.FramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, sceneDepth_, 0);
+    bool ok = gl.CheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.BindTexture(GL_TEXTURE_2D, 0);
+    if (!ok) {
+        fprintf(stderr, "[aw] offscreen render target incomplete (%dx%d)\n", w, h);
+        releaseSceneTarget();
+        return false;
+    }
+    sceneW_ = w; sceneH_ = h; sceneReady_ = true;
+    return true;
+}
+
+void Renderer::releaseSceneTarget() {
+    if (gl.hasFBO) {
+        if (sceneFBO_) gl.DeleteFramebuffers(1, &sceneFBO_);
+        if (sceneColor_) gl.DeleteTextures(1, &sceneColor_);
+        if (sceneDepth_) gl.DeleteTextures(1, &sceneDepth_);
+    }
+    sceneFBO_ = sceneColor_ = sceneDepth_ = 0;
+    sceneW_ = sceneH_ = 0;
+    sceneReady_ = false;
+}
+
+void Renderer::blitScene(int windowW, int windowH) {
+    gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
+    gl.Viewport(0, 0, windowW, windowH);
+    gl.Disable(GL_DEPTH_TEST);
+    gl.DepthMask(GL_FALSE);
+    gl.ClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    gl.Clear(GL_COLOR_BUFFER_BIT);   // letterbox-free; only visible if scaling fails
+    gl.UseProgram(blitProg_);
+    gl.Uniform2f(blitRes_, float(windowW), float(windowH));
+    gl.Uniform1i(blitTex_, 0);
+    gl.ActiveTexture(GL_TEXTURE0);
+    gl.BindTexture(GL_TEXTURE_2D, sceneColor_);
+    gl.BindVertexArray(fullVAO_);
+    gl.DrawArrays(GL_TRIANGLES, 0, 3);
+    gl.BindVertexArray(0);
+    gl.DepthMask(GL_TRUE);
+}
+
 int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewProj,
-                     float aspect, int width, int height, bool targetHot) {
+                     float aspect, int width, int height, int renderW, int renderH,
+                     float fovDeg) {
     if (!ready_) return 0;
 
+    // Render the 3D scene into the offscreen target when the requested render
+    // resolution differs from the window (the UI is drawn later, at window
+    // resolution, so text stays crisp).
+    bool scaled = (renderW != width || renderH != height) && renderW > 0 && renderH > 0 &&
+                  ensureSceneTarget(renderW, renderH);
+    const int sceneW = scaled ? renderW : width;
+    const int sceneH = scaled ? renderH : height;
+    if (scaled) gl.BindFramebuffer(GL_FRAMEBUFFER, sceneFBO_);
+
     // ---- frame setup (viewport + clear every frame) -------------------------
-    gl.Viewport(0, 0, width, height);
+    gl.Viewport(0, 0, sceneW, sceneH);
     gl.ClearColor(0.16f, 0.19f, 0.24f, 1.0f);
     gl.Clear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     gl.DepthFunc(GL_LESS);
@@ -421,12 +519,14 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
     Vec3 fwd = player.forward();
     Vec3 right = normalize(cross(fwd, Vec3{0, 1, 0}));
     Vec3 up = cross(right, fwd);
-    float tanHalf = std::tan(deg2rad(FOV_DEG) * 0.5f);
+    // Match the projection exactly: the sky is a full-screen pass that
+    // reconstructs view rays from the half-FOV tangents.
+    float tanHalf = std::tan(deg2rad(fovDeg) * 0.5f);
     gl.Uniform3f(skyForward_, fwd.x, fwd.y, fwd.z);
     gl.Uniform3f(skyRight_, right.x, right.y, right.z);
     gl.Uniform3f(skyUp_, up.x, up.y, up.z);
     gl.Uniform2f(skyTan_, tanHalf * aspect, tanHalf);
-    gl.Uniform2f(skyRes_, float(width), float(height));
+    gl.Uniform2f(skyRes_, float(sceneW), float(sceneH));
     gl.BindVertexArray(fullVAO_);
     gl.DrawArrays(GL_TRIANGLES, 0, 3);
 
@@ -459,18 +559,10 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
         gl.DrawArraysInstancedARB(GL_TRIANGLES, 0, 36, ch.brickCount);
     });
 
-    // ---- crosshair ----------------------------------------------------------
-    gl.Disable(GL_DEPTH_TEST);
-    gl.Enable(GL_BLEND);
-    gl.BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    gl.UseProgram(crosshairProg_);
-    gl.Uniform2f(crossCenter_, float(width) * 0.5f, float(height) * 0.5f);
-    gl.Uniform2f(crossSize_, 10.0f, 1.6f);
-    gl.Uniform1f(crossHot_, targetHot ? 1.0f : 0.0f);
-    gl.BindVertexArray(fullVAO_);
-    gl.DrawArrays(GL_TRIANGLES, 0, 3);
-    gl.Disable(GL_BLEND);
-
+    // ---- upscale to the window (render-resolution scaling) ------------------
+    // The crosshair and all other overlays are drawn afterwards by the UI pass
+    // at the window resolution, so they never get scaled/blurred.
+    if (scaled) blitScene(width, height);
     gl.BindVertexArray(0);
     return visible;   // accumulated brick counts of the visible chunks
 }
@@ -479,6 +571,8 @@ void Renderer::uiBegin(int width, int height) {
     if (!ready_) return;
     uiWidth_ = width;
     uiHeight_ = height;
+    // Overlays always target the window framebuffer, whatever the 3D scene did.
+    if (gl.hasFBO) gl.BindFramebuffer(GL_FRAMEBUFFER, 0);
     gl.Viewport(0, 0, width, height);
     gl.Disable(GL_DEPTH_TEST);
     gl.DepthMask(GL_FALSE);
@@ -526,6 +620,17 @@ void Renderer::uiText(float x, float y, int scale,
         gl.Uniform4f(uiTextDst_, cx, y, gw, gh);
         gl.DrawArrays(GL_TRIANGLE_STRIP, 0, 4);
     }
+}
+
+void Renderer::uiCrosshair(float scale, bool targetHot) {
+    if (!ready_ || uiWidth_ <= 0 || uiHeight_ <= 0) return;
+    if (!(scale > 0.0f)) scale = 1.0f;
+    gl.UseProgram(crosshairProg_);
+    gl.Uniform2f(crossCenter_, float(uiWidth_) * 0.5f, float(uiHeight_) * 0.5f);
+    gl.Uniform2f(crossSize_, 10.0f * scale, 1.6f * scale);
+    gl.Uniform1f(crossHot_, targetHot ? 1.0f : 0.0f);
+    gl.BindVertexArray(fullVAO_);
+    gl.DrawArrays(GL_TRIANGLES, 0, 3);
 }
 
 void Renderer::uiEnd() {

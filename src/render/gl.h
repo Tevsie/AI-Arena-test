@@ -102,6 +102,13 @@ enum : GLenum {
     GL_EXTENSIONS         = 0x1F03,
     GL_UNIFORM_BUFFER     = 0x8A11,
     GL_DYNAMIC_COPY       = 0x88EA,
+    // framebuffer objects (render-resolution scaling)
+    GL_FRAMEBUFFER        = 0x8D40,
+    GL_COLOR_ATTACHMENT0  = 0x8CE0,
+    GL_DEPTH_ATTACHMENT   = 0x8D00,
+    GL_FRAMEBUFFER_COMPLETE = 0x8CD5,
+    GL_READ_FRAMEBUFFER   = 0x8CA8,
+    GL_DRAW_FRAMEBUFFER   = 0x8CA9,
     // ARB_instanced_arrays
     GL_VERTEX_ATTRIB_ARRAY_DIVISOR_ARB = 0x88FE,
 };
@@ -184,6 +191,15 @@ struct GL {
     // queries / strings
     const GLubyte* (*GetString)(GLenum) = nullptr;
     const GLubyte* (*GetStringi)(GLenum, GLuint) = nullptr;
+
+    // framebuffer objects (optional group: render-resolution scaling is skipped
+    // when a driver does not expose them)
+    void (*GenFramebuffers)(GLsizei, GLuint*) = nullptr;
+    void (*DeleteFramebuffers)(GLsizei, const GLuint*) = nullptr;
+    void (*BindFramebuffer)(GLenum, GLuint) = nullptr;
+    void (*FramebufferTexture2D)(GLenum, GLenum, GLenum, GLuint, GLint) = nullptr;
+    GLenum (*CheckFramebufferStatus)(GLenum) = nullptr;
+    bool hasFBO = false;   // convenience: the five entry points above are usable
 
     // debug (KHR_debug)
     void (*DebugMessageCallbackARB)(void (*)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar*, const void*), const void*) = nullptr;
@@ -298,6 +314,18 @@ bool loadGL(F&& loader) {
             std::fprintf(stderr, "  %s", firstMissing[i]);
         std::fprintf(stderr, "\n");
     }
+    // optional group: framebuffer objects (GL 3.0 core, but tolerate their
+    // absence so the engine still runs without render-resolution scaling)
+    gl.GenFramebuffers = reinterpret_cast<decltype(gl.GenFramebuffers)>(loader("glGenFramebuffers"));
+    gl.DeleteFramebuffers = reinterpret_cast<decltype(gl.DeleteFramebuffers)>(loader("glDeleteFramebuffers"));
+    gl.BindFramebuffer = reinterpret_cast<decltype(gl.BindFramebuffer)>(loader("glBindFramebuffer"));
+    gl.FramebufferTexture2D =
+        reinterpret_cast<decltype(gl.FramebufferTexture2D)>(loader("glFramebufferTexture2D"));
+    gl.CheckFramebufferStatus =
+        reinterpret_cast<decltype(gl.CheckFramebufferStatus)>(loader("glCheckFramebufferStatus"));
+    gl.hasFBO = gl.GenFramebuffers && gl.DeleteFramebuffers && gl.BindFramebuffer &&
+                gl.FramebufferTexture2D && gl.CheckFramebufferStatus;
+
     gl.DebugMessageCallbackARB =
         reinterpret_cast<decltype(gl.DebugMessageCallbackARB)>(loader("glDebugMessageCallback"));
     gl.ready = missing == 0;
