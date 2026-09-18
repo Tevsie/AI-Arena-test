@@ -174,6 +174,14 @@ public:
         // this is what keeps window sizes and mouse coordinates in real pixels.
         enableDpiAwareness();
 
+        // The requested client size is what the settings say (a standard
+        // resolution); the window itself is fitted to what the monitor can show,
+        // so a 4K setting on a 1080p display opens a maximally large window
+        // instead of one that hangs off the desktop. reqW_/reqH_ keep the
+        // request, so moving the window to a bigger display re-fits it up to the
+        // resolution that was chosen.
+        reqW_ = w;
+        reqH_ = h;
         // Never create a window that is larger than the monitor can show.
         int maxW = 0, maxH = 0;
         if (maxWindowSize(maxW, maxH)) {
@@ -197,17 +205,6 @@ public:
         // Outer size for the requested client area at the monitor's DPI, then
         // centre it on the work area so it is fully visible from the start.
         int fw = 0, fh = 0;
-        // The requested client size is what the settings say (a standard
-        // resolution); the window itself is fitted to the screen, so a 4K setting
-        // on a 1080p display opens a maximally large window instead of one that
-        // hangs off the desktop.
-        reqW_ = w;
-        reqH_ = h;
-        int maxW = 0, maxH = 0;
-        if (maxWindowSize(maxW, maxH)) {
-            if (w > maxW) w = maxW;
-            if (h > maxH) h = maxH;
-        }
         frameSize(systemDpi(), fw, fh);
         int winW = w + fw, winH = h + fh;
         int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
