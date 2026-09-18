@@ -1,6 +1,16 @@
-// platform.hpp — platform abstraction: window creation, input, GL context.
+// platform.hpp — platform abstraction: window creation, input, GL context and
+// display-mode management.
 // A real X11/OpenGL backend backs the game when a display + GPU are available;
 // a headless backend keeps the engine runnable (tests / CI / servers) without one.
+//
+// Display modes: the game offers three presentations (see DisplayMode).
+//   Windowed   — a normal OS window; the resolution setting sets its *client*
+//                area, clamped to the desktop minus decorations and taskbar.
+//   Borderless — a borderless window covering 100% of the monitor at its native
+//                resolution; the resolution setting then drives the internal 3D
+//                render resolution (upscaled to the screen, UI stays native).
+//   Exclusive  — a hardware display-mode switch (resolution + refresh rate) from
+//                the driver's supported-mode pool.
 #pragma once
 
 #include <cstdint>
@@ -27,6 +37,73 @@ struct FrameInput {
     bool shouldQuit = false;
 };
 
+// How the game is presented (see the file header).
+enum class DisplayMode : int {
+    Windowed = 0,
+    Borderless = 1,
+    Exclusive = 2,
+};
+
+constexpr int kDisplayModeCount = 3;
+
+inline const char* displayModeName(DisplayMode m) {
+    switch (m) {
+        case DisplayMode::Windowed:   return "WINDOWED";
+        case DisplayMode::Borderless: return "BORDERLESS";
+        case DisplayMode::Exclusive:  return "EXCLUSIVE";
+    }
+    return "?";
+}
+
+// A single display mode from the driver's pool (exclusive fullscreen) or a
+// window client size. `refreshHz` <= 0 means "not applicable / driver default".
+struct DisplayModeInfo {
+    int width = 0;
+    int height = 0;
+    int refreshHz = 0;
+};
+
+// Usable desktop area (screen minus taskbar/docks) of one monitor, in virtual
+// screen pixels. Used to center a window and to clamp windowed sizes.
+struct WorkArea {
+    int x = 0;
+    int y = 0;
+    int width = 0;
+    int height = 0;
+
+    int right() const { return x + width; }
+    int bottom() const { return y + height; }
+};
+
+// Top-left corner that centers a `winW x winH` window (outer size, frame
+// included) inside `work`, clamped so the window always stays fully on the
+// monitor even when it is wider/taller than the work area. Shared by the
+// windowed backends and unit tested (backends cannot be run in CI).
+inline void centerWindowIn(const WorkArea& work, int winW, int winH, int& x, int& y) {
+    if (winW <= 0 || winH <= 0 || work.width <= 0 || work.height <= 0) {
+        x = work.x;
+        y = work.y;
+        return;
+    }
+    x = work.x + (work.width - winW) / 2;
+    y = work.y + (work.height - winH) / 2;
+    if (x + winW > work.right()) x = work.right() - winW;
+    if (y + winH > work.bottom()) y = work.bottom() - winH;
+    if (x < work.x) x = work.x;
+    if (y < work.y) y = work.y;
+}
+
+// Quantize a DPI-derived UI scale onto the supported half steps, clamped to
+// 1.0..2.0: 96 dpi -> 1.0, 120/144 dpi -> 1.5, 192 dpi -> 2.0. Half steps keep
+// the menu's pixel font and panel layout aligned (see Menu::computeLayout).
+inline float quantizeUiScale(float scale) {
+    if (!(scale > 1.0f)) return 1.0f;          // also catches NaN
+    if (scale > 2.0f) scale = 2.0f;
+    int half = int(scale * 2.0f + 0.5f);       // 1.0 -> 2, 1.5 -> 3, 2.0 -> 4
+    if (half < 2) half = 2;
+    return float(half) * 0.5f;
+}
+
 // Backend capability flags.
 struct BackendInfo {
     bool hasWindow = false;
@@ -51,15 +128,84 @@ public:
     // Hide/release the mouse cursor (look capture).
     virtual void setCursorCaptured(bool captured) = 0;
 
-    // Resize the window client area (used by the resolution setting). The new
+    // Resize the window client area (used by the windowed resolution setting).
+    // The backend clamps the request so the window always fits on the monitor
+    // and re-centers it on the monitor the window currently lives on. The new
     // size is reported back through FrameInput in subsequent frames.
     virtual void resize(int width, int height) = 0;
 
-    // Borderless fullscreen toggle (used by the fullscreen setting).
-    virtual void setFullscreen(bool on) = 0;
+    // ---- display modes ------------------------------------------------------
+
+    // Apply a presentation mode. `width`/`height` are the client size for
+    // Windowed and the display mode for Exclusive; Borderless ignores them and
+    // uses the monitor's native resolution (pass 0/0). `refreshHz` selects the
+    // driver refresh rate for Exclusive (<= 0 = driver default).
+    // Returns false when the backend cannot honour the request (no such mode,
+    // driver refused the switch, unsupported on this platform) — the caller
+    // then restores the previous configuration.
+    virtual bool applyDisplayMode(DisplayMode mode, int width, int height, int refreshHz) {
+        (void)mode; (void)width; (void)height; (void)refreshHz;
+        return false;
+    }
+
+    // The mode currently applied by this backend (Borderless/Exclusive are only
+    // reported after a successful applyDisplayMode).
+    virtual DisplayMode currentDisplayMode() const { return DisplayMode::Windowed; }
+
+    // Native resolution of the monitor the window is on: the desktop size a
+    // borderless window covers (unaffected by a temporary exclusive mode).
+    // Returns false when unknown (headless).
+    virtual bool monitorSize(int& width, int& height) const {
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    // The driver's supported display modes for the monitor the window is on,
+    // for exclusive fullscreen. Only 32-bit modes are reported, duplicates
+    // (same size + refresh) are filtered, and refresh rates are valid only for
+    // exclusive mode. Returns 0 when unavailable (headless).
+    virtual int displayModeCount() const { return 0; }
+    virtual bool displayModeAt(int index, DisplayModeInfo& out) const {
+        (void)index; (void)out;
+        return false;
+    }
+
+    // Largest client size (pixels) a *windowed* window may have while still
+    // being fully visible on the monitor's usable area (screen minus taskbar
+    // and window decorations). May be called before init(); returns false when
+    // the backend cannot tell (headless), in which case nothing is clamped.
+    virtual bool maxWindowSize(int& width, int& height) const {
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    // Current client size in pixels. Normally identical to the size reported by
+    // the last frame(), but already updated right after resize() so callers can
+    // render the new size in the very same frame. Returns false when unknown.
+    virtual bool clientSize(int& width, int& height) const {
+        width = 0;
+        height = 0;
+        return false;
+    }
+
+    // Scale factor for the fixed-pixel UI (settings menu): 1.0 at 96 dpi,
+    // larger on high-DPI displays so the menu keeps its apparent size now that
+    // the window really is in screen pixels. Quantized to half steps (see
+    // quantizeUiScale) so the bitmap font stays crisp.
+    virtual float uiScale() const { return 1.0f; }
 
     // GL function loading (no-op on headless). Returns nullptr if not loaded.
     virtual void* loadGLProc(const char* name) = 0;
+
+    // Ask the driver for a swap interval (0 = no vsync). Backends without a
+    // swap-control extension return false; that is not an error, it just means
+    // frame times stay capped by the driver (see --novsync / --bench).
+    virtual bool setSwapInterval(int interval) {
+        (void)interval;
+        return false;
+    }
 };
 
 // Factory selected by the build configuration (see main.cpp). Tries the

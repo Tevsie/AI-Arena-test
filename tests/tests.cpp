@@ -5,16 +5,23 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "src/core/input.hpp"
 #include "src/core/platform.hpp"
 #include "src/game/constants.hpp"
+#include "src/game/debris.hpp"
 #include "src/game/game.hpp"
 #include "src/game/grid.hpp"
 #include "src/game/interaction.hpp"
 #include "src/game/player.hpp"
 #include "src/game/settings.hpp"
 #include "src/game/wall.hpp"
+#include "src/render/look.hpp"
+#include "src/render/shaders.hpp"
+#include "src/render/texture.hpp"
 
 using namespace aw;
 
@@ -42,6 +49,26 @@ static int g_pass = 0;
                     __LINE__, #a, #b, std::fabs(_a - _b), double(eps));      \
         }                                                                    \
     } while (0)
+
+// Applies a display change the menu asked for exactly like Game does, so the
+// backend state in the tests follows the real frame loop.
+static bool applyPendingDisplay(Menu& m, Settings& s, Platform& p) {
+    if (!m.consumeDisplayApply()) return false;
+    Game::applyDisplayConfigTo(p, Game::displayConfigOf(s));
+    return true;
+}
+
+// Navigates the menu to `item` with Down presses (wrap-safe).
+static void selectRow(Menu& m, Settings& s, Audio& a, Platform& p, const FrameInput& base, int item) {
+    for (int guard = 0; guard < 2 * Menu::Count && m.selected() != item; ++guard) {
+        FrameInput in = base;
+        in.keys[KEY_DOWN] = 1;
+        m.update(in, s, a, p);
+        applyPendingDisplay(m, s, p);
+        m.update(base, s, a, p);
+        applyPendingDisplay(m, s, p);
+    }
+}
 
 static FrameInput zeroInput() {
     FrameInput in{};
@@ -424,6 +451,8 @@ static void testSettings() {
     Settings s;
     CHECK_NEAR(s.volume, 0.8, 1e-6);
     CHECK_NEAR(s.sensitivity, 1.0, 1e-6);
+    CHECK(s.mode == DisplayMode::Windowed);
+    CHECK(s.renderWidth == 0 && s.renderHeight == 0);   // 0 = render at window size
     // clamping
     s.volume = 2.0f; s.sensitivity = -1.0f; s.width = 10; s.height = 99999;
     s.clamp();
@@ -431,32 +460,270 @@ static void testSettings() {
     CHECK_NEAR(s.sensitivity, 0.1, 1e-6);
     CHECK(s.width == 320);
     CHECK(s.height == 4320);
-    // serialize/parse roundtrip
+    s.renderWidth = 10; s.renderHeight = 99999; s.clamp();
+    CHECK(s.renderWidth == 320 && s.renderHeight == 4320);
+    s.renderWidth = 0; s.renderHeight = 0; s.clamp();
+    CHECK(s.renderWidth == 0 && s.renderHeight == 0);   // stays "native"
+    s.mode = DisplayMode(9); s.clamp();
+    CHECK(s.mode == DisplayMode::Windowed);
+
+    // serialize/parse roundtrip (every display field)
     Settings a;
-    a.volume = 0.35f; a.sensitivity = 2.5f; a.width = 1920; a.height = 1080;
-    a.fullscreen = true;
-    char buf[256];
+    a.volume = 0.35f; a.sensitivity = 2.5f; a.fov = 95.0f;
+    a.mode = DisplayMode::Exclusive;
+    a.width = 1920; a.height = 1080;
+    a.renderWidth = 2560; a.renderHeight = 1440;
+    a.modeWidth = 1920; a.modeHeight = 1080; a.modeRefresh = 144;
+    char buf[384];
     a.serialize(buf, sizeof(buf));
     Settings b;
     CHECK(b.parse(buf));
     CHECK_NEAR(b.volume, 0.35, 1e-3);
     CHECK_NEAR(b.sensitivity, 2.5, 1e-3);
+    CHECK_NEAR(b.fov, 95.0, 1e-3);
+    CHECK(b.mode == DisplayMode::Exclusive);
     CHECK(b.width == 1920 && b.height == 1080);
-    CHECK(b.fullscreen);
-    CHECK(!Settings().fullscreen);
+    CHECK(b.renderWidth == 2560 && b.renderHeight == 1440);
+    CHECK(b.modeWidth == 1920 && b.modeHeight == 1080 && b.modeRefresh == 144);
+    // legacy config (only a fullscreen flag) maps to borderless fullscreen
+    Settings legacy;
+    CHECK(legacy.parse("volume=0.5\nwidth=1600\nheight=900\nfullscreen=1\n"));
+    CHECK(legacy.mode == DisplayMode::Borderless);
+    Settings legacyOff;
+    CHECK(legacyOff.parse("fullscreen=0\n"));
+    CHECK(legacyOff.mode == DisplayMode::Windowed);
+    // an explicit displaymode always wins over the legacy flag
+    Settings mixed;
+    CHECK(mixed.parse("fullscreen=1\ndisplaymode=0\n"));
+    CHECK(mixed.mode == DisplayMode::Windowed);
     // unknown keys ignored, missing keys keep their values
     Settings c;
     CHECK(c.parse("bogus=123\nvolume=0.5\n"));
     CHECK_NEAR(c.volume, 0.5, 1e-6);
     CHECK_NEAR(c.sensitivity, 1.0, 1e-6);
-    // resolution modes
-    CHECK(a.modeIndex() == 2);
-    a.setMode(0);
-    CHECK(a.width == 1280 && a.height == 720);
-    a.cycleMode(1);
-    CHECK(a.width == 1600 && a.height == 900);
-    a.cycleMode(-1);
-    CHECK(a.width == 1280 && a.height == 720);
+    CHECK_NEAR(c.fov, Settings::kFovDefault, 1e-6);
+
+    // field of view: default, clamping
+    CHECK_NEAR(Settings().fov, 75.0, 1e-6);
+    Settings f;
+    f.fov = 500.0f; f.clamp();
+    CHECK_NEAR(f.fov, Settings::kFovMax, 1e-6);
+    f.fov = 0.0f; f.clamp();
+    CHECK_NEAR(f.fov, Settings::kFovMin, 1e-6);
+}
+
+// ---------------------------------------------------------------------------
+static void testSettingsModeNames() {
+    // The settings file is hand-editable; symbolic display modes are accepted.
+    Settings s;
+    CHECK(s.parse("displaymode=exclusive\nmodewidth=1920\nmodeheight=1080\n"));
+    CHECK(s.mode == DisplayMode::Exclusive);
+    CHECK(s.parse("displaymode=borderless\nrenderwidth=2560\nrenderheight=1440\n"));
+    CHECK(s.mode == DisplayMode::Borderless);
+    CHECK(s.renderWidth == 2560 && s.renderHeight == 1440);
+    CHECK(s.parse("displaymode=windowed\n"));
+    CHECK(s.mode == DisplayMode::Windowed);
+    CHECK(s.parse("displaymode=fullscreen\n"));   // friendly alias
+    CHECK(s.mode == DisplayMode::Borderless);
+    CHECK(s.parse("displaymode=42\n"));           // out of range -> windowed
+    CHECK(s.mode == DisplayMode::Windowed);
+    // What we write is what we read back.
+    Settings w;
+    w.mode = DisplayMode::Exclusive;
+    w.modeWidth = 2560; w.modeHeight = 1440; w.modeRefresh = 144;
+    char buf[384];
+    w.serialize(buf, sizeof(buf));
+    Settings r;
+    CHECK(r.parse(buf));
+    CHECK(r.mode == DisplayMode::Exclusive);
+    CHECK(r.modeWidth == 2560 && r.modeHeight == 1440 && r.modeRefresh == 144);
+}
+
+// ---------------------------------------------------------------------------
+static void testRenderAspectFit() {
+    // A render preset keeps its pixel budget but takes the window's shape.
+    int rw = 0, rh = 0;
+    Settings::fitRenderAspect(1280, 720, 1920, 1080, rw, rh);
+    CHECK(rw == 1280 && rh == 720);                    // exact 16:9 -> unchanged
+    Settings::fitRenderAspect(1280, 720, 2560, 1440, rw, rh);
+    CHECK(rw == 1280 && rh == 720);
+    Settings::fitRenderAspect(1280, 720, 1680, 1050, rw, rh);   // 16:10 window
+    CHECK_NEAR(double(rw) / double(rh), 1.6, 0.01);
+    CHECK(rw * rh > 1280 * 720 * 0.95 && rw * rh < 1280 * 720 * 1.05);
+    Settings::fitRenderAspect(1280, 720, 1024, 768, rw, rh);    // 4:3 window
+    CHECK_NEAR(double(rw) / double(rh), 4.0 / 3.0, 0.01);
+    CHECK(rw * rh > 1280 * 720 * 0.95 && rw * rh < 1280 * 720 * 1.05);
+    // Degenerate inputs are passed through (no division by zero).
+    Settings::fitRenderAspect(1280, 720, 0, 0, rw, rh);
+    CHECK(rw == 1280 && rh == 720);
+    Settings::fitRenderAspect(0, 0, 1920, 1080, rw, rh);
+    CHECK(rw == 0 && rh == 0);
+    // Never below the minimum render size.
+    Settings::fitRenderAspect(100, 100, 4096, 2160, rw, rh);
+    CHECK(rw >= Settings::kMinWindowW && rh >= Settings::kMinWindowH);
+}
+
+// ---------------------------------------------------------------------------
+static void testDisplayModeLists() {
+    Resolution modes[Settings::kMaxModes];
+
+    // ---- windowed: every standard resolution is selectable ------------------
+    int n = Settings::windowModes(modes, Settings::kMaxModes);
+    CHECK(n == Settings::kPresetCount);
+    CHECK(modes[0].w == 1280 && modes[0].h == 720);            // HD
+    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2160);   // 4K
+    for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
+    // Ascending, and independent of the monitor: 1080p and 4K can be picked on a
+    // smaller screen too (the backend fits the window to the screen).
+    for (int i = 1; i < n; ++i)
+        CHECK(modes[i].w * modes[i].h > modes[i - 1].w * modes[i - 1].h);
+    // Non-standard leftovers from older builds snap onto the closest standard
+    // resolution by area -- never into a made-up size.
+    Settings s;
+    s.width = 1902; s.height = 983;            // the old "largest window that fits"
+    s.snapToStandard();
+    CHECK(s.width == 1920 && s.height == 1080);
+    s.width = 1003; s.height = 986;
+    s.snapToStandard();
+    CHECK(s.width == 1280 && s.height == 720);
+    s.width = 2600; s.height = 1450;          // just above QHD
+    s.snapToStandard();
+    CHECK(s.width == 2560 && s.height == 1440);
+    s.width = 3000; s.height = 2000;          // closer to 4K by area
+    s.snapToStandard();
+    CHECK(s.width == 3840 && s.height == 2160);
+    // A standard resolution is kept as it is, even when the screen cannot show it
+    // (the window is fitted, the setting is not).
+    s.width = 3840; s.height = 2160;
+    s.snapToStandard();
+    CHECK(s.width == 3840 && s.height == 2160);
+    s.width = 1920; s.height = 1080;
+    s.snapToStandard();
+    CHECK(s.width == 1920 && s.height == 1080);
+
+    // ---- borderless: render resolutions up to 4K + the native resolution ----
+    n = Settings::renderModes(modes, Settings::kMaxModes, 1920, 1080);
+    CHECK(n == Settings::kPresetCount);       // presets only (up to 4K supersampling)
+    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2160);
+    int nativeEntry = 0;
+    for (int i = 0; i < n; ++i) if (modes[i].w == 1920 && modes[i].h == 1080) ++nativeEntry;
+    CHECK(nativeEntry == 1);                  // native is already a preset: no duplicate
+    // A native resolution between two presets is inserted in ascending order.
+    n = Settings::renderModes(modes, Settings::kMaxModes, 1366, 768);
+    CHECK(n == Settings::kPresetCount + 1);
+    CHECK(modes[1].w == 1366 && modes[1].h == 768);
+    // A virtualised/odd desktop size is not offered as a render resolution; the
+    // "native" default (renderWidth = 0) still renders at the real size.
+    n = Settings::renderModes(modes, Settings::kMaxModes, 1003, 986);
+    CHECK(n == Settings::kPresetCount);
+    for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
+    // Unknown monitor: presets alone.
+    n = Settings::renderModes(modes, Settings::kMaxModes, 0, 0);
+    CHECK(n == Settings::kPresetCount);
+
+    // Stepping never lands off-list (and wraps).
+    int rw = 1280, rh = 720;
+    Settings::stepMode(+1, rw, rh, modes, n);
+    CHECK(rw == 1600 && rh == 900);
+    Settings::stepMode(-1, rw, rh, modes, n);
+    CHECK(rw == 1280 && rh == 720);
+    Settings::stepMode(-1, rw, rh, modes, n);          // wraps to the largest
+    CHECK(rw == 3840 && rh == 2160);
+    Settings::stepMode(+1, rw, rh, modes, n);          // and round to the smallest
+    CHECK(rw == 1280 && rh == 720);
+
+    // ---- exclusive: the driver's pool, deduplicated by size ---------------
+    DisplayModeInfo pool[8] = {
+        {1920, 1080, 60}, {1920, 1080, 144}, {2560, 1440, 60}, {1920, 1080, 60},
+        {1280, 720, 60}, {3840, 2160, 60}, {640, 480, 0}, {0, 0, 0},
+    };
+    n = Settings::exclusiveModes(modes, Settings::kMaxModes, pool, 8);
+    CHECK(n == 5);                                     // 480p/720p/1080p/1440p/4K
+    CHECK(modes[0].w == 640 && modes[0].h == 480);
+    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2160);
+    int hz[16];
+    n = Settings::refreshRates(hz, 16, pool, 8, 1920, 1080);
+    CHECK(n == 3);                                     // 60, 144 and DEFAULT
+    CHECK(hz[0] == 60 && hz[1] == 144 && hz[2] == 0);
+    n = Settings::refreshRates(hz, 16, pool, 8, 3840, 2160);
+    CHECK(n == 2 && hz[0] == 60 && hz[1] == 0);
+    n = Settings::refreshRates(hz, 16, pool, 8, 1024, 768);
+    CHECK(n == 0);                                     // size not offered
+}
+
+// ---------------------------------------------------------------------------
+static void testDisplayConfirm() {
+    // The modal "keep these display settings?" dialog: countdown, keep, revert,
+    // Escape, mouse and the automatic revert when nobody answers.
+    auto input = [](int w, int h) {
+        FrameInput in;
+        in.width = w; in.height = h;
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
+        return in;
+    };
+    DisplayConfirm d;
+    CHECK(!d.active());
+    d.begin(Settings::kDisplayConfirmSeconds, "EXCLUSIVE 1920x1080 60HZ");
+    CHECK(d.active());
+    CHECK_NEAR(d.remaining(), Settings::kDisplayConfirmSeconds, 1e-6);
+    // Countdown ticks down and is still active until it runs out.
+    for (int i = 0; i < 14; ++i) {
+        FrameInput in = input(1920, 1080);
+        CHECK(d.update(in, 1.0f, 1.0f) == DisplayConfirm::None);
+    }
+    CHECK(d.active());
+    // ...and reverts by itself when the timer expires.
+    FrameInput in = input(1920, 1080);
+    CHECK(d.update(in, 2.0f, 1.0f) == DisplayConfirm::Revert);
+    CHECK(!d.active());                       // closed: no second decision
+    CHECK(d.update(in, 1.0f, 1.0f) == DisplayConfirm::None);
+
+    // Enter keeps, Escape reverts.
+    d.begin(15.0f, "TEST");
+    in = input(1920, 1080);
+    in.keys[KEY_ENTER] = 1;
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::Keep);
+    CHECK(!d.active());
+    d.begin(15.0f, "TEST");
+    in = input(1920, 1080);
+    in.keys[KEY_ESC] = 1;
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::Revert);
+    CHECK(!d.active());
+
+    // A dialog opened while Enter is still held (the user just pressed it in
+    // the menu) must not confirm itself: the key has to be pressed again.
+    in = input(1920, 1080);
+    in.keys[KEY_ENTER] = 1;
+    d.begin(15.0f, "TEST", in.keys);
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::None);
+    CHECK(d.active());
+    in.keys[KEY_ENTER] = 0;                     // released...
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::None);
+    in.keys[KEY_ENTER] = 1;                     // ...and pressed again
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::Keep);
+    // Mouse: clicking KEEP confirms, clicking REVERT reverts, nowhere does nothing.
+    // Layout at UI scale 1.0 in a 1920x1080 window: panel 640x250 centered at
+    // (640,415) with a 210x44 button pair starting at y=569.
+    d.begin(15.0f, "TEST");
+    in = input(1920, 1080);
+    in.mouseX = 843.0f; in.mouseY = 591.0f;      // KEEP button centre
+    in.mousePressed[MBTN_LEFT] = true;
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::Keep);
+    d.begin(15.0f, "TEST");
+    in = input(1920, 1080);
+    in.mouseX = 1077.0f; in.mouseY = 591.0f;     // REVERT button centre
+    in.mousePressed[MBTN_LEFT] = true;
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::Revert);
+    d.begin(15.0f, "TEST");
+    in = input(1920, 1080);
+    in.mouseX = 100.0f; in.mouseY = 100.0f;      // outside the buttons
+    in.mousePressed[MBTN_LEFT] = true;
+    CHECK(d.update(in, 0.1f, 1.0f) == DisplayConfirm::None);
+    CHECK(d.active());
+    // cancel() closes without a decision (used after a refused change).
+    d.cancel();
+    CHECK(!d.active());
+    CHECK(d.update(input(1920, 1080), 1.0f, 1.0f) == DisplayConfirm::None);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,50 +748,81 @@ static void testMenuNav() {
     Settings s;
     Menu m;
     m.open();
+    int displayApplies = 0;
 
     auto frame = [&](uint32_t key) {
-        FrameInput in = zeroInput();
+        // Frame input straight from the backend, like the game loop does: this
+        // is what carries the real client size into the menu. The cursor is
+        // parked off the panel so this stays a keyboard-only test.
+        FrameInput in;
+        plat->frame(in);
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
         if (key) in.keys[key] = 1;
         m.update(in, s, audio, *plat);
+        // Mirror the game loop: a display change is applied to the backend.
+        if (applyPendingDisplay(m, s, *plat)) ++displayApplies;
     };
-    // Down x4 -> Restart; Enter -> restart flag.
-    for (int i = 0; i < 4; ++i) { frame(KEY_DOWN); frame(0); }
+    // Down x6 (volume, mode, resolution, refresh, fov, sensitivity) -> Restart.
+    for (int i = 0; i < 6; ++i) { frame(KEY_DOWN); frame(0); }
     CHECK(m.selected() == Menu::Restart);
     frame(KEY_ENTER); frame(0);
     CHECK(m.consumeRestart());
     CHECK(!m.consumeRestart());
     // Up wraps to the top (volume); Right raises the volume bar.
-    for (int i = 0; i < 4; ++i) { frame(KEY_UP); frame(0); }
+    for (int i = 0; i < 6; ++i) { frame(KEY_UP); frame(0); }
     CHECK(m.selected() == Menu::Volume);
     float v0 = s.volume;
     frame(KEY_RIGHT); frame(0);
     CHECK(s.volume > v0);
     frame(KEY_LEFT); frame(0);
     CHECK_NEAR(s.volume, v0, 1e-6);
-    // Resolution cycles + resizes the backend.
-    frame(KEY_DOWN); frame(0);
+    // Window size cycles, resizes the backend, and the change is provisional:
+    // the menu asks the game to apply and confirm it.
+    selectRow(m, s, audio, *plat, zeroInput(), Menu::Resolution);
     CHECK(m.selected() == Menu::Resolution);
-    int w0 = s.width;
+    int w0 = s.width, applies0 = displayApplies;
     frame(KEY_RIGHT); frame(0);
     CHECK(s.width != w0);
+    CHECK(displayApplies == applies0 + 1);   // exactly one request per change
+    CHECK(plat->currentDisplayMode() == DisplayMode::Windowed);
     FrameInput probe = zeroInput();
     plat->frame(probe);
     CHECK(probe.width == s.width && probe.height == s.height);
-    // Fullscreen toggles via Enter and arrows (headless backend ignores it).
-    frame(KEY_DOWN); frame(0);  // sensitivity
-    frame(KEY_DOWN); frame(0);  // fullscreen
-    CHECK(m.selected() == Menu::Fullscreen);
-    CHECK(!s.fullscreen);
-    frame(KEY_ENTER); frame(0);
-    CHECK(s.fullscreen);
-    frame(KEY_LEFT); frame(0);
-    CHECK(!s.fullscreen);
+    // Field of view: arrows step it and it stays inside the slider range.
+    selectRow(m, s, audio, *plat, zeroInput(), Menu::Fov);
+    CHECK(m.selected() == Menu::Fov);
+    float f0 = s.fov;
     frame(KEY_RIGHT); frame(0);
-    CHECK(s.fullscreen);
+    CHECK(s.fov > f0);
+    frame(KEY_LEFT); frame(0);
+    CHECK_NEAR(s.fov, f0, 1e-6);
+    for (int i = 0; i < 30; ++i) { frame(KEY_RIGHT); frame(0); }
+    CHECK(s.fov <= Settings::kFovMax);
+    for (int i = 0; i < 60; ++i) { frame(KEY_LEFT); frame(0); }
+    CHECK(s.fov >= Settings::kFovMin);
+    // Sensitivity is reachable and steps.
+    selectRow(m, s, audio, *plat, zeroInput(), Menu::Sensitivity);
+    CHECK(m.selected() == Menu::Sensitivity);
+    float sens0 = s.sensitivity;
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.sensitivity > sens0);
+    // Display mode cycles windowed -> borderless -> exclusive -> windowed, and
+    // each change is applied to the backend (checkboxes are provisional).
+    selectRow(m, s, audio, *plat, zeroInput(), Menu::Mode);
+    CHECK(m.selected() == Menu::Mode);
+    CHECK(s.mode == DisplayMode::Windowed);
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.mode == DisplayMode::Borderless);
+    CHECK(applies0 + 2 == displayApplies);
+    CHECK(plat->currentDisplayMode() == DisplayMode::Borderless);
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.mode == DisplayMode::Exclusive);
+    frame(KEY_RIGHT); frame(0);
+    CHECK(s.mode == DisplayMode::Windowed);
+    frame(KEY_LEFT); frame(0);
+    CHECK(s.mode == DisplayMode::Exclusive);
     // Quit via keyboard.
-    frame(KEY_DOWN); frame(0);  // restart
-    frame(KEY_DOWN); frame(0);  // resume
-    frame(KEY_DOWN); frame(0);  // quit
+    selectRow(m, s, audio, *plat, zeroInput(), Menu::Quit);
     CHECK(m.selected() == Menu::Quit);
     frame(KEY_ENTER); frame(0);
     CHECK(m.consumeQuit());
@@ -532,6 +830,685 @@ static void testMenuNav() {
     audio.shutdown();
     plat->shutdown();
     delete plat;
+}
+
+// ---------------------------------------------------------------------------
+// Windowed backend with a configurable monitor: exercises the monitor-aware
+// window sizing (and the menu's resolution row) without a real display.
+class StubPlatform final : public Platform {
+public:
+    bool init(const char*, int w, int h) override {
+        width_ = w; height_ = h;
+        return true;
+    }
+    // Display modes: a fake driver pool + recording of applied configurations.
+    bool applyDisplayMode(DisplayMode mode, int w, int h, int hz) override {
+        if (mode == DisplayMode::Exclusive) {
+            if (exclusiveSupported_ == 0) return false;
+            bool found = false;
+            for (int i = 0; i < driverCount_ && !found; ++i)
+                found = driver_[i].width == w && driver_[i].height == h &&
+                        (hz <= 0 || driver_[i].refreshHz == hz);
+            if (!found) return false;
+            desktopW_ = w; desktopH_ = h;
+            width_ = w; height_ = h;
+        } else if (mode == DisplayMode::Borderless) {
+            width_ = desktopW_ > 0 ? desktopW_ : width_;
+            height_ = desktopH_ > 0 ? desktopH_ : height_;
+        } else {
+            resize(w, h);
+        }
+        mode_ = mode;
+        lastW_ = w; lastH_ = h; lastHz_ = hz;
+        ++applyCount_;
+        return true;
+    }
+    DisplayMode currentDisplayMode() const override { return mode_; }
+    bool monitorSize(int& w, int& h) const override {
+        if (desktopW_ <= 0 || desktopH_ <= 0) return false;
+        w = desktopW_; h = desktopH_;
+        return true;
+    }
+    int displayModeCount() const override { return driverCount_; }
+    bool displayModeAt(int index, DisplayModeInfo& out) const override {
+        if (index < 0 || index >= driverCount_) return false;
+        out = driver_[index];
+        return true;
+    }
+    bool frame(FrameInput& in) override {
+        for (int i = 0; i < 8; ++i) { in.mousePressed[i] = false; in.mouseReleased[i] = false; }
+        std::memset(in.keys, 0, sizeof(in.keys));
+        in.mouseDX = in.mouseDY = 0.0f;
+        in.mouseX = float(width_ / 2); in.mouseY = float(height_ / 2);
+        in.width = width_; in.height = height_;
+        in.shouldQuit = false;
+        return true;
+    }
+    void swapBuffers() override {}
+    void shutdown() override {}
+    void setCursorCaptured(bool) override {}
+    // Mirrors the real backends: a request larger than the monitor is clamped.
+    void resize(int w, int h) override {
+        if (w <= 0 || h <= 0) return;
+        if (availW_ > 0 && w > availW_) w = availW_;
+        if (availH_ > 0 && h > availH_) h = availH_;
+        width_ = w; height_ = h;
+    }
+    bool maxWindowSize(int& w, int& h) const override {
+        if (availW_ <= 0 || availH_ <= 0) return false;
+        w = availW_; h = availH_;
+        return true;
+    }
+    bool clientSize(int& w, int& h) const override { w = width_; h = height_; return true; }
+    BackendInfo info() const override {
+        BackendInfo b;
+        b.hasWindow = true;
+        b.hasGL = false;
+        b.name = "stub";
+        return b;
+    }
+    void* loadGLProc(const char*) override { return nullptr; }
+
+    float uiScale() const override { return uiScale_; }
+
+    void setMonitor(int w, int h) { availW_ = w; availH_ = h; }
+    void setDesktop(int w, int h) { desktopW_ = w; desktopH_ = h; }
+    void setUiScale(float s) { uiScale_ = s; }
+    // Fake driver pool (exclusive fullscreen modes).
+    void addDriverMode(int w, int h, int hz) {
+        if (driverCount_ < 32) driver_[driverCount_++] = DisplayModeInfo{w, h, hz};
+    }
+    void setExclusiveSupported(bool on) { exclusiveSupported_ = on ? 1 : 0; }
+    int width() const { return width_; }
+    int height() const { return height_; }
+    DisplayMode mode() const { return mode_; }
+    int applyCount() const { return applyCount_; }
+    int lastW() const { return lastW_; }
+    int lastH() const { return lastH_; }
+    int lastHz() const { return lastHz_; }
+
+private:
+    int availW_ = 0, availH_ = 0;   // largest usable client size (0 = unknown)
+    int desktopW_ = 0, desktopH_ = 0;   // native monitor size (0 = unknown)
+    int width_ = 1280, height_ = 720;
+    float uiScale_ = 1.0f;
+    DisplayMode mode_ = DisplayMode::Windowed;
+    DisplayModeInfo driver_[32]{};
+    int driverCount_ = 0;
+    int exclusiveSupported_ = 1;
+    int applyCount_ = 0, lastW_ = 0, lastH_ = 0, lastHz_ = 0;
+};
+
+// ---------------------------------------------------------------------------
+static void testUiScale() {
+    // DPI-derived scale is quantized to half steps and clamped (96 dpi -> 1.0,
+    // 120/144 dpi -> 1.5, 192 dpi -> 2.0).
+    CHECK_NEAR(quantizeUiScale(1.0f), 1.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(1.25f), 1.5, 1e-6);
+    CHECK_NEAR(quantizeUiScale(1.5f), 1.5, 1e-6);
+    CHECK_NEAR(quantizeUiScale(1.75f), 2.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(2.0f), 2.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(0.5f), 1.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(0.0f), 1.0, 1e-6);
+    CHECK_NEAR(quantizeUiScale(4.0f), 2.0, 1e-6);
+    // The panel must always fit the window: the scale drops back if needed.
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 3840, 2160), 2.0, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 1600, 1300), 2.0, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 1600, 1200), 1.5, 1e-6);   // panel is 620*2 tall
+    CHECK_NEAR(Menu::fitUiScale(2.0f, 1280, 720), 1.0, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(1.5f, 2560, 1440), 1.5, 1e-6);
+    CHECK_NEAR(Menu::fitUiScale(1.0f, 800, 600), 1.0, 1e-6);
+    // Menu clicks still land on the row/button the cursor is over on a scaled
+    // display: ask the menu where it drew the RESUME button, then click there.
+    StubPlatform plat;
+    plat.setMonitor(1600, 1300);
+    plat.setDesktop(1920, 1080);
+    plat.setUiScale(2.0f);
+    plat.init("t", 1600, 1300);
+    Audio audio2;
+    audio2.init(false);
+    Settings s2;
+    Menu m2;
+    m2.open();
+    auto baseInput = [&]() {
+        FrameInput in;
+        plat.frame(in);
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
+        return in;
+    };
+    m2.update(baseInput(), s2, audio2, plat);          // compute the layout
+    CHECK(plat.uiScale() == 2.0f);                     // panel laid out at 2x
+    float bx = 0.0f, by = 0.0f;
+    m2.itemCenter(Menu::Resume, bx, by);
+    CHECK(bx > 0.0f && by > 0.0f && bx < 1600.0f && by < 1300.0f);
+    auto clickAt = [&](float x, float y) {
+        FrameInput in = baseInput();
+        in.mouseX = x; in.mouseY = y;
+        in.mousePressed[MBTN_LEFT] = true;
+        m2.update(in, s2, audio2, plat);
+        applyPendingDisplay(m2, s2, plat);
+        m2.update(baseInput(), s2, audio2, plat);
+        applyPendingDisplay(m2, s2, plat);
+    };
+    clickAt(bx, by);
+    CHECK(m2.selected() == Menu::Resume);
+    CHECK(m2.consumeResume());
+    CHECK(!m2.consumeResume());   // one click, one activation
+    audio2.shutdown();
+    plat.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+static void testWindowSizing() {
+    // A 1920x1080 laptop whose usable area (taskbar + window frame removed) is
+    // 1902x1003: every standard resolution must still be selectable in windowed
+    // mode, with the window fitted to the screen and the setting kept.
+    StubPlatform plat;
+    plat.setMonitor(1902, 1003);
+    plat.setDesktop(1920, 1080);
+    plat.addDriverMode(1280, 720, 60);
+    plat.addDriverMode(1920, 1080, 60);
+    plat.init("t", 1280, 720);
+    Audio audio;
+    audio.init(false);
+    Settings s;
+    Menu m;
+    m.open();
+    int displayApplies = 0;
+
+    auto baseInput = [&]() {
+        FrameInput in;
+        plat.frame(in);
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
+        return in;
+    };
+    auto frame = [&](uint32_t key) {
+        FrameInput in = baseInput();
+        if (key) in.keys[key] = 1;
+        m.update(in, s, audio, plat);
+        if (applyPendingDisplay(m, s, plat)) ++displayApplies;   // like the game loop
+    };
+    auto navTo = [&](int item) {
+        for (int guard = 0; guard < 2 * Menu::Count && m.selected() != item; ++guard) {
+            frame(KEY_DOWN);
+            frame(0);
+        }
+        CHECK(m.selected() == item);
+    };
+
+    // The row lists all five standard resolutions, not just the ones that fit.
+    navTo(Menu::Resolution);
+    CHECK(m.resolutionCount() == Settings::kPresetCount);
+    CHECK(s.width == 1280 && s.height == 720);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1600 && s.height == 900);                  // fits: window too
+    CHECK(plat.width() == 1600 && plat.height() == 900);
+    CHECK(Settings::isStandardResolution(s.width, s.height));
+
+    // Full HD: the setting is 1920x1080, the window is fitted to 1902x1003.
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1920 && s.height == 1080);
+    CHECK(plat.width() == 1902 && plat.height() == 1003);
+
+    // 4K: selectable as well; the setting is kept and the window stays as large
+    // as the screen allows (never larger than the screen).
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 2560 && s.height == 1440);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 3840 && s.height == 2160);
+    CHECK(plat.width() == 1902 && plat.height() == 1003);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1280 && s.height == 720);                  // wraps to HD
+
+    // The fitted window never rewrites the setting into a made-up size, and the
+    // mismatch does not re-trigger an apply on later frames.
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1600 && s.height == 900);
+    const int applies0 = displayApplies;
+    for (int i = 0; i < 10; ++i) {
+        frame(0);
+        CHECK(s.width == 1600 && s.height == 900);
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+    }
+    CHECK(displayApplies == applies0);                          // stable, no re-apply
+
+    // Every standard resolution is reachable and nothing but standard values is
+    // ever selected; the window always fits the screen.
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1920 && s.height == 1080);
+    for (int i = 0; i < 12; ++i) {
+        frame(KEY_RIGHT);
+        frame(0);
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+        CHECK(s.width >= 1280 && s.width <= 3840);
+        CHECK(plat.width() <= 1902 && plat.height() <= 1003);
+    }
+
+    // ---- borderless: render resolution list has no odd entry either --------
+    navTo(Menu::Mode);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.mode == DisplayMode::Borderless);
+    CHECK(plat.mode() == DisplayMode::Borderless);
+    CHECK(plat.width() == 1920 && plat.height() == 1080);       // monitor size
+    navTo(Menu::Resolution);
+    CHECK(s.renderWidth == 0 && s.renderHeight == 0);           // native
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.renderWidth > 0 && s.renderHeight > 0);
+    for (int i = 0; i < 8; ++i) {
+        frame(KEY_RIGHT);
+        frame(0);
+        CHECK(s.renderWidth >= 1280 && s.renderWidth <= 3840);
+        CHECK(Settings::isStandardResolution(s.renderWidth, s.renderHeight));
+    }
+    CHECK(plat.width() == 1920 && plat.height() == 1080);       // window untouched
+
+    // ---- exclusive: the list is the driver's pool --------------------------
+    navTo(Menu::Mode);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.mode == DisplayMode::Exclusive);
+    navTo(Menu::Resolution);
+    s.modeWidth = 1920; s.modeHeight = 1080; s.modeRefresh = 0;
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.modeWidth == 1280 && s.modeHeight == 720);          // largest -> wraps
+    CHECK(plat.mode() == DisplayMode::Exclusive);
+    CHECK(plat.lastW() == 1280 && plat.lastH() == 720);
+    navTo(Menu::Refresh);
+    s.modeRefresh = 0;
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.modeRefresh == 60);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.modeRefresh == 0);                                  // DEFAULT
+
+    audio.shutdown();
+    plat.shutdown();
+}
+
+static void testDisplayConfirmOnce() {
+    const char* kCfg = "settings_once_test.cfg";
+    FILE* pre = std::fopen(kCfg, "rb");
+    bool hadSettings = (pre != nullptr);
+    if (pre) std::fclose(pre);
+    Settings::setPathForTests(kCfg);
+
+    {
+        Settings saved;
+        saved.mode = DisplayMode::Windowed;
+        saved.width = 1280; saved.height = 720;
+        saved.save();
+        Game g;
+        CHECK(g.init("t", 1280, 720, true));    // headless backend
+        Settings& s = g.settings();
+        Menu& m = g.menu();
+        g.openMenu();
+
+        auto input = [](uint32_t key) {
+            FrameInput in;
+            std::memset(in.keys, 0, sizeof(in.keys));
+            if (key) in.keys[key] = 1;
+            in.width = 1280; in.height = 720;
+            in.mouseX = -1.0f; in.mouseY = -1.0f;
+            return in;
+        };
+        // Counts the changes and the dialogs the user would see.
+        int changes = 0, dialogs = 0;
+        bool dialogWasActive = false;
+        int lastW = s.width, lastH = s.height;
+        auto step = [&](uint32_t key) {
+            FrameInput in = input(key);
+            g.stepOverlay(in, 1.0f / 60.0f);
+            if (s.width != lastW || s.height != lastH) { ++changes; lastW = s.width; lastH = s.height; }
+            bool active = g.displayConfirmActive();
+            if (active && !dialogWasActive) ++dialogs;
+            dialogWasActive = active;
+        };
+
+        // Menu Down presses need a release between them (edge triggered).
+        for (int i = 0; i < 2; ++i) { step(KEY_DOWN); step(0); }
+        CHECK(m.selected() == Menu::Resolution);
+        CHECK(changes == 0 && dialogs == 0);
+
+        // One Right press: exactly one change and one dialog.
+        const int w0 = s.width;
+        step(KEY_RIGHT);
+        CHECK(s.width != w0);
+        CHECK(changes == 1);
+        CHECK(dialogs == 1);
+        CHECK(g.displayConfirmActive());
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+
+        // Right stays held while the dialog is up: the menu must not keep
+        // stepping and the dialog must not be re-opened.
+        for (int i = 0; i < 5; ++i) step(KEY_RIGHT);
+        CHECK(changes == 1 && dialogs == 1);
+        const int w1 = s.width;
+
+        // Windowed sizes are standard resolutions: a standard value is *kept*
+        // even when the screen cannot show it (the window is fitted to the
+        // screen instead), and a leftover non-standard value snaps to the
+        // closest standard one.
+        {
+            Game g2;                               // headless: no window limits
+            CHECK(g2.init("t", 1280, 720, true));
+            CHECK(Settings::isStandardResolution(g2.settings().width, g2.settings().height));
+        }
+        {
+            StubPlatform plat;
+            plat.setMonitor(1902, 1003);           // 1920x1080 screen + taskbar/frame
+            plat.setDesktop(1920, 1080);
+            plat.init("t", 1280, 720);
+            Settings s2;
+            s2.mode = DisplayMode::Windowed;
+            s2.width = 3840; s2.height = 2160;     // saved on a 4K monitor, not here
+            Game::snapWindowSizeToStandard(s2);
+            CHECK(s2.width == 3840 && s2.height == 2160);   // the choice is kept
+            CHECK(Game::applyDisplayConfigTo(plat, Game::displayConfigOf(s2)));
+            CHECK(plat.width() == 1902 && plat.height() == 1003);   // window fitted
+            CHECK(plat.mode() == DisplayMode::Windowed);
+            // A non-standard value (older build) snaps to a standard resolution.
+            s2.width = 1902; s2.height = 983;
+            Game::snapWindowSizeToStandard(s2);
+            CHECK(s2.width == 1920 && s2.height == 1080);
+            CHECK(Game::applyDisplayConfigTo(plat, Game::displayConfigOf(s2)));
+            CHECK(plat.width() == 1902 && plat.height() == 1003);
+            // Other modes are untouched (their window is the monitor).
+            s2.mode = DisplayMode::Borderless;
+            s2.width = 1003; s2.height = 986;
+            Game::snapWindowSizeToStandard(s2);
+            CHECK(s2.width == 1003 && s2.height == 986);
+            plat.shutdown();
+        }
+
+        // A second change arriving while the user is still deciding is refused
+        // outright instead of stacking another dialog on top of the first.
+        const int hz0 = s.height;
+        s.width = 1600; s.height = 900;
+        CHECK(!g.requestDisplayApply());
+        CHECK(g.displayConfirmActive());
+        CHECK(dialogs == 1 && changes == 1);
+        s.width = w1; s.height = hz0;          // what the dialog is asking about
+        step(0);
+        CHECK(dialogs == 1);
+
+        // Confirm with Enter and keep it held for a while: the dialog closes
+        // once and the held key does not act on the menu below it.
+        step(0);                     // release Right
+        step(KEY_ENTER);             // confirm
+        CHECK(!g.displayConfirmActive());
+        for (int i = 0; i < 8; ++i) step(KEY_ENTER);
+        CHECK(changes == 1);         // no second change
+        CHECK(dialogs == 1);         // no second dialog
+        CHECK(s.width == w1);
+
+        // Releasing and pressing again really does change it (once).
+        step(0);
+        step(KEY_RIGHT);
+        CHECK(changes == 2);
+        CHECK(dialogs == 2);
+        CHECK(g.displayConfirmActive());
+
+        // Escape reverts that provisional change back to the confirmed state.
+        step(0);
+        step(KEY_ESC);
+        CHECK(changes == 3);                       // back to w1
+        CHECK(s.width == w1);
+        CHECK(!g.displayConfirmActive());
+        CHECK(g.stableDisplayConfig().width == w1);
+
+        // 20 idle frames do not produce another dialog or a hidden change.
+        for (int i = 0; i < 20; ++i) step(0);
+        CHECK(changes == 3 && dialogs == 2);
+        CHECK(!g.displayConfirmActive());
+        g.shutdown();
+    }
+
+    Settings::setPathForTests(nullptr);
+    if (!hadSettings) std::remove(kCfg);
+}
+
+// ---------------------------------------------------------------------------
+// Window centering math (the backends call this after every resize; they cannot
+// be exercised in CI, so the shared helper is covered here).
+static void testWindowCentering() {
+    WorkArea work;
+    work.x = 0; work.y = 0; work.width = 1920; work.height = 1040;   // taskbar
+    int x = 0, y = 0;
+    centerWindowIn(work, 1280, 720, x, y);
+    CHECK(x == 320 && y == 160);                       // exactly centered
+    centerWindowIn(work, 1600, 900, x, y);
+    CHECK(x == 160 && y == 70);
+    // Odd remainders round down, never off-screen.
+    centerWindowIn(work, 1281, 721, x, y);
+    CHECK(x == 319 && y == 159);
+    // A window as big as the work area (or bigger) is pinned inside it.
+    centerWindowIn(work, 1920, 1040, x, y);
+    CHECK(x == 0 && y == 0);
+    centerWindowIn(work, 2000, 1200, x, y);
+    CHECK(x == 0 && y == 0 && x + 2000 >= work.right() && y + 1200 >= work.bottom());
+    // A secondary monitor offset by its origin.
+    WorkArea second;
+    second.x = 1920; second.y = -200; second.width = 1600; second.height = 900;
+    centerWindowIn(second, 1280, 720, x, y);
+    CHECK(x == 1920 + 160 && y == -200 + 90);
+    // Degenerate input never produces a negative/garbage origin.
+    centerWindowIn(work, 0, 0, x, y);
+    CHECK(x == 0 && y == 0);
+    centerWindowIn(WorkArea{}, 1280, 720, x, y);
+    CHECK(x == 0 && y == 0);
+    // The window must always end up fully inside the usable area.
+    for (int w = 640; w <= 2600; w += 137) {
+        for (int h = 480; h <= 1600; h += 91) {
+            centerWindowIn(work, w, h, x, y);
+            CHECK(x >= work.x && y >= work.y);
+            if (w <= work.width) CHECK(x + w <= work.right());
+            if (h <= work.height) CHECK(y + h <= work.bottom());
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+static void testDisplayModeApply() {
+    // End-to-end display handling through Game with a stub backend: provisional
+    // apply, confirmation, automatic revert and the "last confirmed" state.
+    StubPlatform plat;   // not owned by Game (only DisplayConfirm/menu need it)
+    plat.setMonitor(1920, 1040);
+    plat.setDesktop(1920, 1080);
+    plat.setUiScale(1.0f);
+    plat.addDriverMode(1920, 1080, 60);
+    plat.addDriverMode(1920, 1080, 144);
+    plat.addDriverMode(1280, 720, 60);
+    plat.init("t", 1280, 720);
+
+    Settings s;
+    // displayConfigOf / setDisplayConfig are pure conversions of the settings.
+    s.mode = DisplayMode::Borderless;
+    s.renderWidth = 1920; s.renderHeight = 1080;
+    s.width = 1600; s.height = 900;
+    s.modeWidth = 1920; s.modeHeight = 1080; s.modeRefresh = 144;
+    DisplayConfig cfg = Game::displayConfigOf(s);
+    CHECK(cfg.mode == DisplayMode::Borderless);
+    CHECK(cfg.renderWidth == 1920 && cfg.renderHeight == 1080);
+    CHECK(cfg.width == 1600 && cfg.height == 900);
+    CHECK(cfg.modeWidth == 1920 && cfg.modeHeight == 1080 && cfg.modeRefresh == 144);
+    Settings back;
+    Game::setDisplayConfig(back, cfg);
+    CHECK(back.mode == DisplayMode::Borderless);
+    CHECK(back.renderWidth == 1920 && back.renderHeight == 1080);
+    CHECK(back.modeWidth == 1920 && back.modeRefresh == 144);
+    CHECK(Game::displayConfigOf(back) == cfg);
+
+    // A refused exclusive mode keeps the requested values in the pending config
+    // (Game restores the stable one) and never touches the display.
+    s.mode = DisplayMode::Exclusive;
+    s.modeWidth = 1024; s.modeHeight = 768; s.modeRefresh = 60;
+    plat.setExclusiveSupported(false);
+    CHECK(!plat.applyDisplayMode(s.mode, s.modeWidth, s.modeHeight, s.modeRefresh));
+    plat.setExclusiveSupported(true);
+    CHECK(plat.applyDisplayMode(DisplayMode::Exclusive, 1920, 1080, 144));
+    CHECK(plat.mode() == DisplayMode::Exclusive);
+    CHECK(plat.lastW() == 1920 && plat.lastH() == 1080 && plat.lastHz() == 144);
+    // A mode outside the driver pool is refused too.
+    CHECK(!plat.applyDisplayMode(DisplayMode::Exclusive, 1024, 768, 60));
+
+    // Headless: neutral (every configuration is accepted so CI/tests never fail
+    // on a saved display mode).
+    Platform* headless = createHeadlessPlatform();
+    CHECK(headless->init("t", 1280, 720));
+    CHECK(headless->applyDisplayMode(DisplayMode::Exclusive, 3840, 2160, 60));
+    CHECK(headless->currentDisplayMode() == DisplayMode::Exclusive);
+    CHECK(headless->displayModeCount() == 0);
+    int mw = 0, mh = 0;
+    CHECK(!headless->monitorSize(mw, mh));
+    // Headless mode lists fall back to the presets so the menu still works.
+    Resolution modes[Settings::kMaxModes];
+    int n = Settings::renderModes(modes, Settings::kMaxModes, mw, mh);
+    CHECK(n == Settings::kPresetCount);
+    headless->shutdown();
+    delete headless;
+}
+
+// ---------------------------------------------------------------------------
+static void testGameDisplayFlow() {
+    // The full flow against the headless backend (which accepts every mode):
+    // a saved configuration is restored, an edit is applied *provisionally*,
+    // the confirmation dialog decides, and Escape/timeout restore the previous
+    // stable configuration.
+    const char* kCfg = "settings_display_test.cfg";
+    FILE* pre = std::fopen(kCfg, "rb");
+    bool hadSettings = (pre != nullptr);
+    if (pre) std::fclose(pre);
+    Settings::setPathForTests(kCfg);
+
+    auto input = [](int w, int h) {
+        FrameInput in;
+        std::memset(in.keys, 0, sizeof(in.keys));
+        in.width = w; in.height = h;
+        in.mouseX = -1.0f; in.mouseY = -1.0f;
+        return in;
+    };
+
+    {
+        Settings saved;
+        saved.mode = DisplayMode::Borderless;
+        saved.renderWidth = 1920; saved.renderHeight = 1080;
+        saved.save();
+        Game g;
+        CHECK(g.init("t", 1280, 720, true));   // headless
+        CHECK(g.settings().mode == DisplayMode::Borderless);
+        CHECK(g.settings().renderWidth == 1920 && g.settings().renderHeight == 1080);
+        CHECK(!g.displayConfirmActive());
+        // Render resolution follows the borderless configuration; the window
+        // (and therefore the UI size) is untouched.
+        int rw = 0, rh = 0;
+        g.renderSizeFor(1920, 1080, rw, rh);
+        CHECK(rw == 1920 && rh == 1080);
+        g.renderSizeFor(2560, 1440, rw, rh);
+        CHECK(rw == 1920 && rh == 1080);    // render scale, not window size
+        // The render resolution adopts the window's aspect ratio (same pixel
+        // budget), so a 16:9 preset on a 16:10 or 4:3 monitor does not stretch.
+        g.renderSizeFor(1600, 900, rw, rh);
+        CHECK(rw == 1920 && rh == 1080);          // 16:9 preset on a 16:9 window
+        g.renderSizeFor(1920, 1200, rw, rh);      // 16:10 window
+        CHECK_NEAR(double(rw) / double(rh), 1.6, 0.01);
+        CHECK(rw * rh > 1920 * 1080 * 0.95 && rw * rh < 1920 * 1080 * 1.05);
+        g.renderSizeFor(1600, 1200, rw, rh);      // 4:3 window
+        CHECK_NEAR(double(rw) / double(rh), 4.0 / 3.0, 0.01);
+        CHECK(rw * rh > 1920 * 1080 * 0.95 && rw * rh < 1920 * 1080 * 1.05);
+        // Windowed mode renders at the window size.
+        g.settings().mode = DisplayMode::Windowed;
+        g.renderSizeFor(1600, 900, rw, rh);
+        CHECK(rw == 1600 && rh == 900);
+
+        // An edit starts the countdown, and the stable state is still the
+        // restored (confirmed) one until the user accepts the change.
+        g.settings().mode = DisplayMode::Borderless;
+        g.settings().renderWidth = 1280; g.settings().renderHeight = 720;
+        CHECK(g.requestDisplayApply());
+        CHECK(g.displayConfirmActive());
+        CHECK(g.stableDisplayConfig().mode == DisplayMode::Borderless);
+        CHECK(g.stableDisplayConfig().renderWidth == 1920);   // the saved one
+        // Enter confirms: the configuration becomes stable and is persisted.
+        FrameInput in = input(1280, 720);
+        in.keys[KEY_ENTER] = 1;
+        CHECK(g.pollDisplayConfirm(in, 0.1f));          // active this frame
+        CHECK(!g.pollDisplayConfirm(in, 0.1f));         // dialog closed
+        CHECK(!g.displayConfirmActive());
+        CHECK(g.stableDisplayConfig().mode == DisplayMode::Borderless);
+        CHECK(g.stableDisplayConfig().renderWidth == 1280);
+        g.shutdown();
+        Settings reread;
+        CHECK(reread.load());
+        CHECK(reread.mode == DisplayMode::Borderless);
+        CHECK(reread.renderWidth == 1280 && reread.renderHeight == 720);
+
+        // A second change is reverted with Escape: the confirmed settings (and
+        // the settings file) go back to the previous stable state.
+        Game g2;
+        CHECK(g2.init("t", 1280, 720, true));
+        CHECK(g2.settings().mode == DisplayMode::Borderless);
+        g2.settings().renderWidth = 2560; g2.settings().renderHeight = 1440;
+        CHECK(g2.requestDisplayApply());
+        CHECK(g2.displayConfirmActive());
+        FrameInput esc = input(1280, 720);
+        esc.keys[KEY_ESC] = 1;
+        CHECK(g2.pollDisplayConfirm(esc, 0.1f));
+        CHECK(!g2.displayConfirmActive());
+        CHECK(g2.settings().renderWidth == 1280 && g2.settings().renderHeight == 720);
+        CHECK(g2.stableDisplayConfig().renderWidth == 1280);
+        // and the timeout reverts too (the countdown is 15 s by default).
+        g2.settings().mode = DisplayMode::Windowed;
+        g2.settings().width = 1600; g2.settings().height = 900;
+        CHECK(g2.requestDisplayApply());
+        CHECK(g2.displayConfirmActive());
+        for (int i = 0; i < 20 && g2.displayConfirmActive(); ++i)
+            g2.pollDisplayConfirm(input(1280, 720), 1.0f);
+        CHECK(!g2.displayConfirmActive());
+        CHECK(g2.settings().mode == DisplayMode::Borderless);   // reverted
+        // A change to the *same* configuration needs no confirmation.
+        const DisplayConfig before = g2.stableDisplayConfig();
+        CHECK(g2.requestDisplayApply());
+        CHECK(!g2.displayConfirmActive());
+        CHECK(g2.stableDisplayConfig() == before);
+        g2.shutdown();
+
+        // A saved exclusive mode is re-applied on start-up and, being
+        // provisional, asks for confirmation (the user must not be dropped into
+        // an unconfirmed video mode).
+        Settings ex;
+        ex.mode = DisplayMode::Exclusive;
+        ex.modeWidth = 1920; ex.modeHeight = 1080; ex.modeRefresh = 60;
+        ex.save();
+        // (Only a real display switch is confirmed at start-up; the headless
+        // backend has nothing to accept, so the rule is unit tested directly.)
+        CHECK(Game::needsStartupConfirm(DisplayMode::Exclusive, false));
+        CHECK(!Game::needsStartupConfirm(DisplayMode::Exclusive, true));
+        CHECK(!Game::needsStartupConfirm(DisplayMode::Borderless, false));
+        CHECK(!Game::needsStartupConfirm(DisplayMode::Windowed, false));
+        Game g3;
+        CHECK(g3.init("t", 1280, 720, true));
+        CHECK(g3.settings().mode == DisplayMode::Exclusive);
+        CHECK(!g3.displayConfirmActive());                 // headless: no switch
+        CHECK(g3.stableDisplayConfig().mode == DisplayMode::Exclusive);
+        g3.shutdown();
+        Settings after;
+        CHECK(after.load());
+        CHECK(after.mode == DisplayMode::Exclusive);       // still the saved mode
+    }
+
+    Settings::setPathForTests(nullptr);
+    if (!hadSettings) std::remove(kCfg);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,6 +1544,572 @@ static void testRestart() {
 }
 
 // ---------------------------------------------------------------------------
+// The golden-hour look: one palette, driven by altitude.
+// ---------------------------------------------------------------------------
+static void testLookPalette() {
+    // Keyframes are sorted, and the palette clamps outside their range.
+    int n = 0;
+    const LookKey* keys = lookKeys(n);
+    CHECK(n >= 3);
+    for (int i = 1; i < n; ++i) CHECK(keys[i].altitude > keys[i - 1].altitude);
+    Look lo = lookAtAltitude(-1000.0f);
+    Look hi = lookAtAltitude(100000.0f);
+    CHECK_NEAR(lo.sunIntensity, keys[0].look.sunIntensity, 1e-6);
+    CHECK_NEAR(hi.sunIntensity, keys[n - 1].look.sunIntensity, 1e-6);
+    CHECK_NEAR(lo.fogDensity, keys[0].look.fogDensity, 1e-6);
+
+    // Sun direction stays unit length everywhere (it is used for lighting and
+    // for the visible sun disc at the same time).
+    for (float y = 0.0f; y <= 400.0f; y += 5.0f) {
+        Look L = lookAtAltitude(y);
+        CHECK_NEAR(double(length(L.sunDir)), 1.0, 1e-4);
+    }
+
+    // The story: climbing lifts the sun, thins the air and opens the sky.
+    Look g = lookAtAltitude(0.0f);
+    Look m = lookAtAltitude(100.0f);
+    Look t = lookAtAltitude(320.0f);
+    CHECK(m.sunDir.y > g.sunDir.y);
+    CHECK(t.sunDir.y > m.sunDir.y);
+    CHECK(m.fogDensity < g.fogDensity);
+    CHECK(t.fogDensity < m.fogDensity);
+    CHECK(t.starAmount > m.starAmount);
+    CHECK(g.starAmount < 0.01f);
+    CHECK(t.cloudCover < g.cloudCover);
+    // Ground level is the warm end of the palette.
+    CHECK(g.sunColor.x > g.sunColor.z);
+    CHECK(t.skyZenith.z > t.skyZenith.x);
+}
+
+static void testLookSky() {
+    Look L = lookAtAltitude(100.0f);
+    Vec3 up{0, 1, 0};
+    Vec3 towardSun = L.sunDir;
+    Vec3 away = -L.sunDir;
+
+    Vec3 zenith = skyAirColor(up, L);
+    Vec3 nearSun = skyAirColor(towardSun, L);
+    Vec3 antiSun = skyAirColor(away, L);
+    // The sun's half of the sky is brighter and warmer than the other half.
+    CHECK(nearSun.x + nearSun.y + nearSun.z > antiSun.x + antiSun.y + antiSun.z);
+    CHECK(nearSun.x - nearSun.z > antiSun.x - antiSun.z);
+    // Looking up is cooler/bluer than looking along the horizon at the sun.
+    CHECK(zenith.z / (zenith.x + 1e-4f) > 0.8f);
+    // The full sky adds the sun disc on top of the "air" colour.
+    Vec3 disc = skyColor(towardSun, L);
+    CHECK(disc.x >= nearSun.x);
+    // Haze: looking down/at the horizon is warmer than the zenith.
+    Vec3 down = skyAirColor(Vec3{0.3f, -0.2f, 0.9f}, L);
+    CHECK(down.x > down.z);
+
+    // Aerial perspective: monotone in distance, 0 in front of the camera.
+    CHECK_NEAR(fogAmount(0.0f, L), 0.0, 1e-6);
+    CHECK_NEAR(fogAmount(-10.0f, L), 0.0, 1e-6);
+    float prev = -1.0f;
+    for (float d = 0.0f; d <= 400.0f; d += 10.0f) {
+        float f = fogAmount(d, L);
+        CHECK(f >= prev);
+        prev = f;
+    }
+    CHECK(fogAmount(FAR_PLANE, L) > 0.5f);   // the far wall is measurably hazy
+    CHECK(fogAmount(FAR_PLANE, L) < 1.0f);   // ...but never a flat wall of colour
+
+    // Thinner air at altitude means less haze over the same distance.
+    Look high = lookAtAltitude(320.0f);
+    CHECK(fogAmount(200.0f, high) < fogAmount(200.0f, lookAtAltitude(0.0f)));
+}
+
+// ---------------------------------------------------------------------------
+// Procedural textures: deterministic, tileable, and shaped like stone.
+// ---------------------------------------------------------------------------
+static void testStoneTextures() {
+    TextureSet a = bakeStoneTextures();
+    TextureSet b = bakeStoneTextures();
+    CHECK(a.data.size() == size_t(TextureSet::kLayers) * TextureSet::kSize * TextureSet::kSize * 4);
+    CHECK(a.data == b.data);                       // no RNG state, fully deterministic
+    CHECK(TextureSet::kQuadrant * 2 == TextureSet::kSize);
+
+    // Every stone type is distinct (the wall must not look like one brick type).
+    for (int t = 1; t < TextureSet::kLayers; ++t) {
+        bool differs = false;
+        for (int i = 0; i < TextureSet::kSize * 4; ++i) {
+            if (a.data[size_t(t) * TextureSet::kSize * TextureSet::kSize * 4 + i] !=
+                a.data[size_t(t - 1) * TextureSet::kSize * TextureSet::kSize * 4 + i]) {
+                differs = true;
+                break;
+            }
+        }
+        CHECK(differs);
+    }
+
+    // Mean brightness per quadrant: the face is the brightest tile, the mortar
+    // the darkest (that contrast is what makes the mosaic read).
+    for (int t = 0; t < TextureSet::kLayers; ++t) {
+        double sum[4] = {0, 0, 0, 0};
+        int cnt = 0;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                float u = (float(x) + 0.5f) / 16.0f, v = (float(y) + 0.5f) / 16.0f;
+                for (int q = 0; q < 4; ++q) {
+                    uint8_t c[4];
+                    a.sample(t, q, u, v, c);
+                    sum[q] += c[0];
+                }
+                ++cnt;
+            }
+        }
+        for (int q = 0; q < 4; ++q) sum[q] /= double(cnt);
+        CHECK(sum[TextureSet::QFace] > sum[TextureSet::QMortar]);
+        CHECK(sum[TextureSet::QFace] > sum[TextureSet::QPitted]);
+        // Every value stays in range (the shader reads it as albedo).
+        CHECK(sum[TextureSet::QMortar] > 0.0);
+    }
+
+    // Height (alpha) is the relief: the mortar quadrant sits *back* from the
+    // face and the pitted tile has deeper holes than the clean one.
+    for (int t = 0; t < TextureSet::kLayers; ++t) {
+        float face = 0.0f, mortar = 0.0f, deepFace = 0.0f, deepPit = 0.0f;
+        for (int y = 0; y < 24; ++y) {
+            for (int x = 0; x < 24; ++x) {
+                float u = (float(x) + 0.5f) / 24.0f, v = (float(y) + 0.5f) / 24.0f;
+                face += a.sampleHeight(t, TextureSet::QFace, u, v);
+                mortar += a.sampleHeight(t, TextureSet::QMortar, u, v);
+                if (a.sampleHeight(t, TextureSet::QFace, u, v) < 0.45f) deepFace += 1.0f;
+                if (a.sampleHeight(t, TextureSet::QPitted, u, v) < 0.45f) deepPit += 1.0f;
+            }
+        }
+        CHECK(mortar < face);
+        CHECK(deepPit >= deepFace);
+    }
+
+    // Profiles: ids are dense and every one is usable by the shader.
+    CHECK(brickProfileCount() == TextureSet::kLayers);
+    for (int t = 0; t < brickProfileCount(); ++t) {
+        BrickProfile p = brickProfile(t);
+        CHECK(p.tint[0] > 0.3f && p.tint[0] < 1.4f);
+        CHECK(p.relief >= 0.0f && p.relief <= 1.0f);
+        CHECK(p.roughness > 0.0f && p.roughness <= 1.0f);
+        CHECK(p.speckle >= 0.0f && p.speckle <= 1.0f);
+        CHECK(p.stain >= 0.0f && p.stain <= 1.0f);
+    }
+
+    // Every shade byte the generator can produce maps to a valid profile, and
+    // all profiles are actually reachable (otherwise a stone type never appears).
+    bool used[8] = {false, false, false, false, false, false, false, false};
+    for (int s8 = 0; s8 < 256; ++s8) {
+        int t = brickTypeFromShade(s8);
+        CHECK(t >= 0 && t < brickProfileCount());
+        used[t] = true;
+    }
+    for (int t = 0; t < brickProfileCount(); ++t) CHECK(used[t]);
+
+    // The generator's hash really is spread over the whole byte range, which is
+    // what feeds that distribution (and the per-brick tone/weathering).
+    int buckets[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (int bx = 0; bx < 64; ++bx)
+        for (int by = 0; by < 64; ++by)
+            ++buckets[brickTypeFromShade(int((hash2d(bx, by) >> 20) & 0xFF))];
+    for (int i = 0; i < 8; ++i) CHECK(buckets[i] > 0);
+
+    // Value noise tiles: the lattice wraps, so a baked texture has no seam.
+    for (int i = 0; i < 8; ++i) {
+        float x = 0.37f * float(i) + 0.11f;
+        CHECK_NEAR(texValueNoise(x, 2.5f, 8, 7u),
+                   texValueNoise(x + 8.0f, 2.5f, 8, 7u), 1e-5);
+        CHECK_NEAR(texValueNoise(1.25f, x, 8, 7u),
+                   texValueNoise(1.25f, x + 8.0f, 8, 7u), 1e-5);
+    }
+    CHECK_NEAR(texValueNoise(0.5f, 0.5f, 4, 3u), 0.5f, 0.75f);   // in range
+
+    // The wall body tile is baked too, and its mortar is set back.
+    std::vector<uint8_t> wall = bakeWallBody();
+    CHECK(wall.size() == size_t(TextureSet::kSize) * TextureSet::kSize * 4);
+    double lum = 0.0;
+    int lit = 0;
+    for (size_t i = 0; i < wall.size(); i += 4) {
+        lum += wall[i];
+        if (wall[i] > 40) ++lit;
+    }
+    CHECK(lum / double(wall.size() / 4) > 20.0);
+    CHECK(lit > 0);
+
+    // The shader's profile table is generated from the same data, so every id
+    // appears in the GLSL the driver compiles.
+    std::string glsl = brickProfileGLSL();
+    CHECK(glsl.find("stoneProfile") != std::string::npos);
+    for (int t = 1; t < brickProfileCount(); ++t) {
+        char want[24];
+        std::snprintf(want, sizeof(want), "if (t == %d)", t);
+        CHECK(glsl.find(want) != std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Strata: the stone mix changes with altitude, deterministically.
+// ---------------------------------------------------------------------------
+static void testFamilyStrata() {
+    // Band 0 must reproduce the baseline distribution exactly (the tables were
+    // designed on top of it, and older saves/looks should not shift).
+    int band0[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t* w0 = familyWeights(0);
+    int sum = 0;
+    for (int i = 0; i < 8; ++i) sum += int(w0[i]);
+    CHECK(sum == 256);
+    for (int h = 0; h < 256; ++h) ++band0[brickTypeFor(h, 8, 4)];
+    CHECK(band0[0] == 92);
+    CHECK(band0[1] == 30);
+    CHECK(band0[7] == 30);
+
+    // Every band's weights are a valid distribution.
+    for (int b = 0; b < familyBandCount(); ++b) {
+        const uint8_t* w = familyWeights(b);
+        int total = 0;
+        for (int i = 0; i < 8; ++i) total += int(w[i]);
+        CHECK(total == 256);
+        // No band is a single stone: the wall always reads as mixed rock.
+        for (int i = 0; i < 8; ++i) CHECK(w[i] > 0);
+        CHECK(w[0] > 20);        // plain stone always dominates a little
+    }
+
+    // Adjacent strata differ, and the mix at a given height matches the band.
+    CHECK(familyWeights(1)[2] != familyWeights(0)[2]);      // granite-rich band
+    CHECK(familyWeights(2)[2] > familyWeights(0)[2]);
+    CHECK(familyWeights(3)[3] > familyWeights(0)[3]);       // terracotta band
+    CHECK(familyWeightsFor(8, 10) == familyWeights(familyBandFor(8, 10)));
+    CHECK(familyWeightsFor(8, 400) == familyWeights(familyBandFor(8, 400)));
+
+    // Climbing far enough really does land in a different stratum, and every
+    // stone profile is reachable across the wall.
+    int bandsSeen = 0;
+    bool bandUsed[familyBandCount()] = {false, false, false, false, false, false};
+    bool typeUsed[8] = {false, false, false, false, false, false, false, false};
+    for (int by = -500; by < 1500; by += 7) {
+        for (int bx = -300; bx < 300; bx += 37) {
+            int b = familyBandFor(bx, by) % familyBandCount();
+            if (b < 0) b += familyBandCount();
+            if (!bandUsed[b]) { bandUsed[b] = true; ++bandsSeen; }
+            for (int h = 0; h < 256; h += 17) typeUsed[brickTypeFor(h, bx, by)] = true;
+            // Deterministic: same brick, same answer, forever.
+            CHECK(brickTypeFor(int((hash2d(bx, by) >> 20) & 0xFF), bx, by) ==
+                  brickTypeFor(int((hash2d(bx, by) >> 20) & 0xFF), bx, by));
+        }
+    }
+    CHECK(bandsSeen == familyBandCount());
+    for (int t = 0; t < 8; ++t) CHECK(typeUsed[t]);
+
+    // Pure function of position: two calls with the same inputs agree even far
+    // apart in iteration order (this is what chunk streaming relies on).
+    CHECK(brickTypeFor(77, -13, 640) == brickTypeFor(77, -13, 640));
+    int same = 0, diff = 0;
+    for (int by = 0; by < 2000; by += 13) {
+        if (familyBandFor(0, by) == familyBandFor(0, 0)) ++same; else ++diff;
+    }
+    CHECK(same > 0 && diff > 0);
+
+    // The bottom of the wall starts in band 0 (the first thing the player sees),
+    // and the strata stack: climbing never drops back to an earlier band. The
+    // boundary drifts by a few bricks horizontally, which is the point.
+    CHECK(familyBandFor(0, 0) == 0);
+    CHECK(familyBandFor(7, 40) == 0);
+    CHECK(familyBandFor(0, 200) >= 1);
+    for (int bx : {-64, 0, 64, 200}) {
+        int prev = familyBandFor(bx, -200);
+        for (int by = -200; by < 1200; ++by) {
+            int b = familyBandFor(bx, by);
+            CHECK(b >= prev);
+            prev = b;
+        }
+        CHECK(prev >= 10);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debris: procedural chips and dust. Visual only, fixed pool, deterministic.
+// ---------------------------------------------------------------------------
+static void testDebris() {
+    Debris a, b;
+    a.reset();
+    b.reset();
+
+    // Deterministic: the same spawn sequence gives the same particles.
+    a.spawnBrickPuff(Vec3{48.0f, 10.0f, 0.0f}, Vec3{0, 0, 1}, 14, 1.0f);
+    b.spawnBrickPuff(Vec3{48.0f, 10.0f, 0.0f}, Vec3{0, 0, 1}, 14, 1.0f);
+    CHECK(a.count() == b.count());
+    CHECK(a.count() > 0);
+    for (int i = 0; i < a.count(); ++i) {
+        CHECK_NEAR(a.at(i).pos.x, b.at(i).pos.x, 1e-6);
+        CHECK_NEAR(a.at(i).vel.y, b.at(i).vel.y, 1e-6);
+        CHECK_NEAR(a.at(i).size, b.at(i).size, 1e-6);
+        CHECK_NEAR(a.at(i).shade, b.at(i).shade, 1e-6);
+    }
+
+    // A puff emits chips *and* dust motes: bigger, longer-lived, slower.
+    int chips = 0, motes = 0;
+    for (int i = 0; i < a.count(); ++i) {
+        const DebrisParticle& p = a.at(i);
+        CHECK(p.size > 0.0f && p.size < 0.6f);
+        CHECK(p.lifeMax > 0.5f && p.lifeMax < 8.0f);
+        CHECK(p.life == 0.0f);
+        CHECK(p.shade >= 0.0f && p.shade <= 255.0f);
+        if (p.size > 0.12f) ++motes; else ++chips;
+    }
+    CHECK(chips > 0 && motes > 0);
+
+    // Everything must live and then die: nothing is immortal.
+    float maxLife = 0.0f;
+    for (int i = 0; i < a.count(); ++i) maxLife = std::max(maxLife, a.at(i).lifeMax);
+    for (float t = 0.0f; t < maxLife + 1.0f; t += 1.0f / 60.0f) a.update(1.0f / 60.0f);
+    CHECK(a.count() == 0);
+
+    // Gravity pulls chips down, and the wall face is a floor.
+    Debris c;
+    c.reset();
+    c.spawnBrickPuff(Vec3{48.0f, 10.0f, -0.1f}, Vec3{0, 0, 1}, 6, 1.0f);
+    float y0 = c.at(0).pos.y;
+    float vy0 = c.at(0).vel.y;
+    c.update(0.05f);
+    CHECK(c.at(0).vel.y < vy0);          // gravity
+    for (int i = 0; i < 200; ++i) c.update(1.0f / 60.0f);
+    bool aboveGround = true;
+    for (int i = 0; i < c.count(); ++i) {
+        if (c.at(i).pos.z < -1.25f) aboveGround = false;
+    }
+    CHECK(aboveGround);
+    (void)y0;
+
+    // The pool is a hard cap: spamming spawns can never grow it.
+    Debris d;
+    d.reset();
+    for (int i = 0; i < 500; ++i)
+        d.spawnBrickPuff(Vec3{0, 0, 0}, Vec3{0, 0, 1}, 20, 3.0f);
+    CHECK(d.count() <= Debris::CAP);
+    CHECK(d.count() == Debris::CAP);
+
+    // reset() clears everything (restart must not leave yesterday's dust).
+    d.reset();
+    CHECK(d.count() == 0);
+
+    // A landing puff scales with the impact, and motes are cheap and small.
+    Debris e;
+    e.reset();
+    e.spawnLandingPuff(Vec3{10.0f, 2.0f, 0.0f}, 2.0f);
+    int soft = e.count();
+    e.reset();
+    e.spawnLandingPuff(Vec3{10.0f, 2.0f, 0.0f}, 18.0f);
+    CHECK(e.count() > soft);
+    e.reset();
+    e.spawnAmbientMote(Vec3{0, 0, 0}, Vec3{0, 0, 1});
+    CHECK(e.count() == 1);
+    CHECK(e.at(0).size < 0.10f);
+    CHECK(e.at(0).pos.z > 0.0f);        // in front of the camera
+    CHECK(e.at(0).pos.z < 12.0f);       // and close enough to be seen
+}
+
+// ---------------------------------------------------------------------------
+// GLSL structural checks.
+//
+// The look shaders can only be compiled by a driver, so the unit tests do the
+// next best thing and check the invariants a failed compile would break:
+// balanced braces, every u-prefixed uniform actually declared, and the vertex /
+// fragment varying interfaces agreeing name-for-name and type-for-type. This
+// catches the realistic failure mode (a typo or a renamed varying that only
+// shows up as "the game looks flat on one driver").
+// ---------------------------------------------------------------------------
+static std::string stripComments(const std::string& src) {
+    std::string out;
+    for (size_t i = 0; i < src.size(); ++i) {
+        if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '/') {
+            while (i < src.size() && src[i] != '\n') ++i;
+        } else if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < src.size() && !(src[i] == '*' && src[i + 1] == '/')) ++i;
+            ++i;
+        } else {
+            out.push_back(src[i]);
+        }
+    }
+    return out;
+}
+
+static bool balanced(const std::string& src, char open, char close) {
+    int depth = 0;
+    for (char c : src) {
+        if (c == open) ++depth;
+        else if (c == close) { --depth; if (depth < 0) return false; }
+    }
+    return depth == 0;
+}
+
+// "uniform vec3 uSunDir;" / "out vec3 vWorld;" -> ("vec3 uSunDir")
+static void collectDecls(const std::string& src, const char* qualifier,
+                         std::set<std::string>& out) {
+    std::string q = std::string(qualifier) + " ";
+    size_t pos = 0;
+    while ((pos = src.find(q, pos)) != std::string::npos) {
+        // Only at a statement start (not inside a word like "inout").
+        bool atStart = pos == 0 || src[pos - 1] == '\n' || src[pos - 1] == ' ' ||
+                       src[pos - 1] == ';' || src[pos - 1] == '{' || src[pos - 1] == '}';
+        size_t end = src.find(';', pos);
+        if (!atStart || end == std::string::npos) { pos += q.size(); continue; }
+        std::string decl = src.substr(pos + q.size(), end - pos - q.size());
+        // Drop precision qualifiers and array suffixes are kept as-is.
+        while (!decl.empty() && (decl.front() == ' ' || decl.front() == '\t')) decl.erase(0, 1);
+        while (!decl.empty() && (decl.back() == ' ' || decl.back() == '\t')) decl.pop_back();
+        // Only real declarations ("out vec3 vWorld;") — not the "out" parameters
+        // of a function signature, which would run to the next semicolon.
+        bool shapeOk = !decl.empty() && decl.find('#') == std::string::npos &&
+                       decl.find('(') == std::string::npos &&
+                       decl.find(')') == std::string::npos &&
+                       decl.find(',') == std::string::npos &&
+                       decl.find('{') == std::string::npos &&
+                       decl.size() < 64;
+        if (shapeOk) out.insert(decl);
+        pos = end;
+    }
+}
+
+// Every identifier of the form uSomething must be a declared uniform: it is the
+// kind of typo that silently disables a feature.
+static void checkUniformNames(const std::string& src, const char* label) {
+    std::set<std::string> uniforms;
+    {
+        std::string q = "uniform ";
+        size_t pos = 0;
+        while ((pos = src.find(q, pos)) != std::string::npos) {
+            size_t end = src.find(';', pos);
+            if (end == std::string::npos) break;
+            std::string decl = src.substr(pos + q.size(), end - pos - q.size());
+            size_t sp = decl.rfind(' ');
+            if (sp != std::string::npos) uniforms.insert(decl.substr(sp + 1));
+            pos = end;
+        }
+    }
+    CHECK(!uniforms.empty());
+    size_t pos = 0;
+    int checked = 0;
+    while (pos < src.size()) {
+        if (src[pos] == 'u' && pos + 1 < src.size() && src[pos + 1] >= 'A' && src[pos + 1] <= 'Z') {
+            size_t e = pos + 1;
+            while (e < src.size() && (std::isalnum((unsigned char)src[e]) || src[e] == '_')) ++e;
+            std::string name = src.substr(pos, e - pos);
+            // Skip words that merely start with a capital after a 'u' inside a
+            // longer identifier (e.g. "awUniform").
+            bool standalone = pos == 0 || !(std::isalnum((unsigned char)src[pos - 1]) ||
+                                            src[pos - 1] == '_');
+            if (standalone) {
+                ++checked;
+                if (uniforms.find(name) == uniforms.end()) {
+                    fprintf(stderr, "FAIL %s: uniform %s is used but never declared\n",
+                            label, name.c_str());
+                    CHECK(false);
+                }
+            }
+            pos = e;
+        } else {
+            ++pos;
+        }
+    }
+    CHECK(checked > 0);
+}
+
+static void testShaderSources() {
+    // buildSrc(), exactly as the renderer concatenates it.
+    auto build = [](const char* body) {
+        return stripComments(std::string("#version 330 core\n") + lookGLSL() +
+                             brickProfileGLSL() + body);
+    };
+
+    const std::string brickVS = build(shaders::kBrickVS);
+    const std::string brickFS = build(shaders::kBrickFS);
+    const std::string skyFS = build(shaders::kSkyFS);
+    const std::string wallVS = build(shaders::kWallVS);
+    const std::string wallFS = build(shaders::kWallFS);
+    const std::string brightFS = build(shaders::kBrightFS);
+    const std::string blurFS = build(shaders::kBlurFS);
+    const std::string postFS = build(shaders::kPostFS);
+
+    for (const auto* pair : {&brickVS, &brickFS, &skyFS, &wallVS, &wallFS, &brightFS, &blurFS,
+                             &postFS}) {
+        CHECK(!pair->empty());
+        CHECK(pair->find("#version 330 core") == 0);
+        CHECK(balanced(*pair, '{', '}'));
+        CHECK(balanced(*pair, '(', ')'));
+        CHECK(pair->find("GLSL") == std::string::npos);   // no stray raw-string markers
+        checkUniformNames(*pair, "shader");
+    }
+
+    // Vertex -> fragment interfaces must agree exactly (this is what a driver
+    // rejects with "varying not declared in the fragment shader").
+    auto varyingsMatch = [](const std::string& vs, const std::string& fs, const char* who) {
+        std::set<std::string> outs, ins;
+        collectDecls(vs, "out", outs);
+        collectDecls(fs, "in", ins);
+        outs.erase("vec4 fragColor");
+        for (const std::string& d : outs) {
+            if (ins.find(d) == ins.end()) {
+                fprintf(stderr, "FAIL %s: vertex output [%s] has no matching fragment input\n",
+                        who, d.c_str());
+                CHECK(false);
+            }
+        }
+        for (const std::string& d : ins) {
+            if (outs.find(d) == outs.end()) {
+                fprintf(stderr, "FAIL %s: fragment input [%s] has no matching vertex output\n",
+                        who, d.c_str());
+                CHECK(false);
+            }
+        }
+        return !outs.empty();
+    };
+    CHECK(varyingsMatch(brickVS, brickFS, "brick"));
+    CHECK(varyingsMatch(wallVS, wallFS, "wall"));
+
+    // The shared look block must declare everything the shaders read, and the
+    // C++ lookup list must name the same uniforms (a rename on one side only
+    // would silently leave a default value in place).
+    std::string look = stripComments(lookGLSL());
+    std::string all = look + brickVS + brickFS + skyFS + wallVS + wallFS + brightFS + blurFS +
+                      postFS;
+    const char* names[] = {"uSunDir", "uSunColor", "uSkyZenith", "uSkyHorizon", "uSkyGround",
+                           "uHazeColor", "uSunIntensity", "uAmbientSky", "uAmbientGround",
+                           "uSpecular", "uRimStrength", "uHazeStrength", "uCloudCover",
+                           "uStarAmount", "uFogDensity", "uFogSkyMix", "uExposure",
+                           "uBloomStrength", "uBloomThreshold", "uVignette", "uGrain",
+                           "uTime", "uCamPos"};
+    for (const char* n : names) {
+        const std::string name(n);
+        // Exactly one declaration, on a "uniform ..." line of the shared block.
+        int decls = 0;
+        size_t pos = 0;
+        while ((pos = look.find(name, pos)) != std::string::npos) {
+            size_t lineStart = look.rfind('\n', pos);
+            lineStart = lineStart == std::string::npos ? 0 : lineStart + 1;
+            if (look.compare(lineStart, 7, "uniform") == 0) ++decls;
+            pos += name.size();
+        }
+        CHECK(decls == 1);
+        // ... and consumed at least once somewhere (prefix helper or a body): a
+        // declared-but-unused uniform is stripped, its location comes back -1 and
+        // the renderer silently skips it, so the feature would quietly do nothing.
+        int uses = 0;
+        pos = 0;
+        while ((pos = all.find(name, pos)) != std::string::npos) { ++uses; pos += name.size(); }
+        CHECK(uses >= 2);
+    }
+
+    // The generated profile table must be valid GLSL shape: one function, one
+    // branch per stone type, and every branch assigning all five outputs.
+    std::string prof = brickProfileGLSL();
+    CHECK(balanced(prof, '{', '}'));
+    CHECK(prof.find("void stoneProfile(int t, out vec3 tint, out float relief, out float rough,")
+          != std::string::npos);
+    int branches = 0;
+    size_t pos = 0;
+    while ((pos = prof.find("if (t == ", pos)) != std::string::npos) { ++branches; ++pos; }
+    CHECK(branches == brickProfileCount() - 1);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     testGrid();
     testMosaic();
@@ -577,9 +2120,25 @@ int main() {
     testFallForever();
     testInteraction();
     testSettings();
+    testSettingsModeNames();
+    testRenderAspectFit();
+    testDisplayModeLists();
+    testWindowCentering();
+    testDisplayConfirmOnce();
+    testDisplayConfirm();
     testSensitivity();
     testMenuNav();
+    testUiScale();
+    testWindowSizing();
+    testDisplayModeApply();
+    testGameDisplayFlow();
     testRestart();
+    testLookPalette();
+    testLookSky();
+    testStoneTextures();
+    testShaderSources();
+    testFamilyStrata();
+    testDebris();
 
     fprintf(stderr, "\n[aw-tests] %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;
