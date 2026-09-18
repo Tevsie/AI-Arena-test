@@ -1,0 +1,7 @@
+src/core/window_win32.cpp: In member function ‘virtual bool aw::PlatformWin32::init(const char*, int, int)’:
+src/core/window_win32.cpp:230:13: warning: cast between incompatible function types from ‘PROC’ {aka ‘long long int (*)()’} to ‘aw::{anonymous}::PFNWGLCREATECONTEXTATTRIBSARBPROC’ {aka ‘HGLRC__* (*)(HDC__*, HGLRC__*, const int*)’} [-Wcast-function-type]
+  230 |             reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  231 |                 wglGetProcAddress("wglCreateContextAttribsARB"));
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+exit=0

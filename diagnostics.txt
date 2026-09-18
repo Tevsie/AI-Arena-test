@@ -1,0 +1,23 @@
+== toolchain ==
+x86_64-w64-mingw32-g++ (GCC) 13-win32
+Copyright (C) 2023 Free Software Foundation, Inc.
+== atw.exe ==
+-rwxr-xr-x 1 runner runner 1057579 Sep 18 20:48 atw.exe
+fbf1757b18e118d04bf950192d802fd03163dc903fee0cc0552af0091f32f5b1  atw.exe
+== imported DLLs (must not include libstdc++ / libgcc) ==
+	DLL Name: GDI32.dll
+	DLL Name: KERNEL32.dll
+	DLL Name: msvcrt.dll
+	DLL Name: OPENGL32.dll
+	DLL Name: USER32.dll
+	DLL Name: WINMM.dll
+== Linux binary ==
+-rwxr-xr-x 1 runner runner 236976 Sep 18 20:48 build/atw
+== build log ==
+src/core/window_win32.cpp: In member function ‘virtual bool aw::PlatformWin32::init(const char*, int, int)’:
+src/core/window_win32.cpp:230:13: warning: cast between incompatible function types from ‘PROC’ {aka ‘long long int (*)()’} to ‘aw::{anonymous}::PFNWGLCREATECONTEXTATTRIBSARBPROC’ {aka ‘HGLRC__* (*)(HDC__*, HGLRC__*, const int*)’} [-Wcast-function-type]
+  230 |             reinterpret_cast<PFNWGLCREATECONTEXTATTRIBSARBPROC>(
+      |             ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  231 |                 wglGetProcAddress("wglCreateContextAttribsARB"));
+      |                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+exit=0
