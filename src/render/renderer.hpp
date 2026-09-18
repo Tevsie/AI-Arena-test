@@ -11,6 +11,7 @@
 #include "../game/constants.hpp"
 #include "../game/player.hpp"
 #include "../game/wall.hpp"
+#include "look.hpp"
 
 namespace aw {
 
@@ -44,11 +45,24 @@ public:
     void uiCrosshair(float scale, bool targetHot);
     void uiEnd();
 
+    // ---- golden-hour look ---------------------------------------------------
+    // Animated sky (drifting clouds, twinkling stars). Seconds since start.
+    void setTime(float seconds) { time_ = seconds; }
+    // The palette that was used for the last frame's altitude (read by the HUD).
+    const Look& look() const { return look_; }
+    // False when the driver rejected the look shaders and the renderer fell back
+    // to the legacy flat shading (the GLSL error is logged once, at init).
+    bool lookPipeline() const { return lookPipeline_; }
+    // Post-processing (bloom + tonemap + vignette) can be toggled for A/B looks.
+    void setPostEnabled(bool on) { postEnabled_ = on; }
+    bool postEnabled() const { return postEnabled_; }
+
 private:
     struct Instance {
         float model[16];
-        float shade;
-        float pad[3];
+        float shade;      // per-brick hash byte -> tone + weathering
+        float type;       // stone profile id (see texture.hpp)
+        float pad[2];
     };
 
     // GL object handles/uniform locations are plain integers here (the GL type
@@ -67,6 +81,38 @@ private:
     int uiRectRes_ = -1, uiRectDst_ = -1, uiRectCol_ = -1;
     int uiTextRes_ = -1, uiTextDst_ = -1, uiTextUV_ = -1, uiTextCol_ = -1, uiTextTex_ = -1;
     int uiWidth_ = 0, uiHeight_ = 0;
+
+    // ---- golden-hour look pipeline -----------------------------------------
+    // True when the new stone/sky/wall-body shaders are in use. Every look
+    // feature hangs off this, so a driver that rejects a shader still runs.
+    bool lookPipeline_ = false;
+    bool postReady_ = false;       // bloom + tonemap chain available
+    bool postEnabled_ = true;      // user/runtime toggle (--no-post, F4)
+    float time_ = 0.0f;
+    Look look_{};
+
+    unsigned wallProg_ = 0, brightProg_ = 0, blurProg_ = 0, postProg_ = 0;
+    LookUniforms brickLook_, skyLook_, wallLook_, postLook_;
+    int uStone_ = -1, uBump_ = -1;
+    int wallVP_ = -1, wallOffset_ = -1, wallSize_ = -1, wallZ_ = -1, wallTex_ = -1;
+    int brightScene_ = -1, brightSize_ = -1, brightThreshold_ = -1;
+    int blurSrc_ = -1, blurSize_ = -1, blurStep_ = -1;
+    int postScene_ = -1, postBloom_ = -1, postRes_ = -1;
+    unsigned stoneTex_ = 0, wallBodyTex_ = 0;
+    unsigned wallVAO_ = 0, wallVBO_ = 0;
+    // Half-resolution bloom ping-pong (bright pass -> blur X -> blur Y).
+    unsigned bloomFBO_ = 0, blurFBO_ = 0, bloomA_ = 0, bloomB_ = 0;
+    int bloomW_ = 0, bloomH_ = 0;
+    float bumpScale_ = 0.35f;
+
+    // Upload the baked procedural textures (no-op without glTexImage3D).
+    bool uploadStoneTextures();
+    void releaseStoneTextures();
+    bool ensureBloomTarget(int w, int h);
+    void releaseBloomTarget();
+    // Bloom + ACES tonemap + vignette, then upscale to the window framebuffer.
+    void postProcess(int windowW, int windowH);
+
     // Offscreen target for render-resolution scaling (3D only).
     int blitRes_ = -1, blitTex_ = -1, blitScale_ = -1;
     unsigned sceneFBO_ = 0, sceneColor_ = 0, sceneDepth_ = 0;

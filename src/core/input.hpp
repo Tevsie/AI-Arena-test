@@ -20,6 +20,10 @@ constexpr uint32_t KEY_SHIFT = 0x100 + 0xe1;  // XK_Shift_L
 constexpr uint32_t KEY_CTRL = 0x100 + 0xe3;   // XK_Control_L
 constexpr uint32_t KEY_E = 0x65, KEY_Q = 0x71;
 constexpr uint32_t KEY_R = 0x72, KEY_F = 0x66, KEY_P = 0x70, KEY_X = 0x78;
+// Function keys: X11 folds XK_F1..F12 (0xFFBE..0xFFC9) to 0x1BE..0x1C9 and the
+// Win32 backend maps VK_F1..F12 to the same codes (see vkToKey).
+constexpr uint32_t KEY_F1 = 0x100 + 0xbe, KEY_F2 = 0x100 + 0xbf;
+constexpr uint32_t KEY_F3 = 0x100 + 0xc0, KEY_F4 = 0x100 + 0xc1;
 // Menu navigation (X11 keysym low bytes; the Win32 backend maps VK_* here).
 constexpr uint32_t KEY_TAB = 0x100 + 0x09;    // XK_Tab
 constexpr uint32_t KEY_ENTER = 0x100 + 0x0d;  // XK_Return

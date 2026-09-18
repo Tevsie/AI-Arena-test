@@ -19,8 +19,13 @@ namespace {
 void printUsage() {
     fprintf(stderr,
             "usage: atw [--headless] [--frames N] [--width W] [--height H]\n"
-            "  --headless   run without a window/GPU (benchmark/demo mode)\n"
-            "  --frames N   exit after N frames (headless default 1200)\n");
+            "           [--bench] [--novsync] [--no-post] [--hud]\n"
+            "  --headless   run without a window/GPU (deterministic demo mode)\n"
+            "  --frames N   exit after N frames (headless default 1200)\n"
+            "  --bench      run the scripted path and report frame-time percentiles\n"
+            "  --novsync    ask the driver to disable vsync (benchmarking)\n"
+            "  --no-post    disable bloom/tonemap (compare the raw image, key F4)\n"
+            "  --hud        start with the F3 diagnostics overlay on\n");
 }
 
 #if defined(_WIN32)
@@ -51,6 +56,10 @@ int main(int argc, char** argv) {
     initLogging();
 #endif
     bool forceHeadless = false;
+    bool bench = false;
+    bool noVsync = false;
+    bool noPost = false;
+    bool hud = false;
     int width = 1280, height = 720;
     int frames = 1200;
 
@@ -61,6 +70,10 @@ int main(int argc, char** argv) {
             return argv[++i];
         };
         if (std::strcmp(a, "--headless") == 0) forceHeadless = true;
+        else if (std::strcmp(a, "--bench") == 0) bench = true;
+        else if (std::strcmp(a, "--novsync") == 0) noVsync = true;
+        else if (std::strcmp(a, "--no-post") == 0) noPost = true;
+        else if (std::strcmp(a, "--hud") == 0) hud = true;
         else if (std::strcmp(a, "--frames") == 0) frames = std::atoi(need());
         else if (std::strcmp(a, "--width") == 0) width = std::atoi(need());
         else if (std::strcmp(a, "--height") == 0) height = std::atoi(need());
@@ -82,6 +95,7 @@ int main(int argc, char** argv) {
     }
 
     aw::Game game;
+    (void)noPost;
     if (!game.init("Against the Wall (C++20 prototype)", width, height, forceHeadless)) {
         fprintf(stderr, "[aw] failed to initialize\n");
 #if defined(_WIN32)
@@ -94,6 +108,20 @@ int main(int argc, char** argv) {
         return 1;
     }
     fprintf(stderr, "[aw] backend: %s\n", game.headless() ? "headless" : "windowed");
+
+    // --bench runs the scripted camera path (identical to headless mode) and
+    // reports percentiles; --frames limits any run, windowed included.
+    if (bench) {
+        game.setBenchMode(true);
+        if (frames == 1200) frames = 1800;   // a little longer: 30 s at 60 Hz
+    }
+    if (frames > 0) game.setFrameLimit(frames);
+    if (noVsync && !game.headless()) {
+        if (game.setSwapInterval(0)) fprintf(stderr, "[aw] vsync disabled (benchmark mode)\n");
+        else fprintf(stderr, "[aw] no swap-control extension; vsync unchanged\n");
+    }
+    if (noPost) game.renderer().setPostEnabled(false);
+    if (hud) game.setHudVisible(true);
 
     game.run();
 

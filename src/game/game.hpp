@@ -28,6 +28,9 @@ struct FrameStats {
     int32_t drawCalls = 1;       // instanced wall = 1 draw call
     int32_t modifiedBricks = 0;
     int32_t playerBrickY = 0;
+    // Frame-time percentiles, filled in by --bench runs (milliseconds).
+    double benchP50 = 0.0, benchP95 = 0.0, benchWorst = 0.0;
+    int benchFrames = 0;
 };
 
 // The display-related part of Settings: what a display change actually toggles.
@@ -105,6 +108,30 @@ public:
     // Headless/demo mode flag.
     bool headless() const { return !platform_->info().hasGL; }
 
+    // ---- benchmarking -------------------------------------------------------
+    // `--bench`: run the scripted camera path (the same one headless uses) for a
+    // fixed number of frames and report frame-time percentiles. Comparability
+    // comes from the fixed path, so two machines (or two settings) can be
+    // compared directly. Frame times are still vsync-capped unless the driver
+    // swap interval is off.
+    void setBenchMode(bool on) { benchMode_ = on; }
+    bool benchMode() const { return benchMode_; }
+    // Stop after `n` frames in any mode (0 = run until quit).
+    void setFrameLimit(int n) { frameLimit_ = n; }
+    // Forwarded to the backend (see Platform::setSwapInterval). False when the
+    // driver has no swap-control extension.
+    bool setSwapInterval(int interval) {
+        return platform_ ? platform_->setSwapInterval(interval) : false;
+    }
+
+    // ---- look / HUD ---------------------------------------------------------
+    // F3 diagnostics overlay (frame times, chunk/instance counts, altitude and
+    // the palette in use). Off by default: the shipped look is unobstructed.
+    bool hudVisible() const { return hudOn_; }
+    void setHudVisible(bool on) { hudOn_ = on; }
+    // Renderer access (look toggles, tests).
+    Renderer& renderer() { return renderer_; }
+
     // Exposed for tests.
     Wall& wall() { return wall_; }
     Player& player() { return player_; }
@@ -116,6 +143,7 @@ private:
     void demoDrive(float dt);
     float seedWorld();        // (re)builds the starting platform; returns its top
     void fitWindowToMonitor(); // clamp the windowed size to the monitor
+    void drawHud();            // F3 diagnostics overlay
 
     Platform* platform_ = nullptr;
     Wall wall_;
@@ -139,6 +167,11 @@ private:
     bool initialized_ = false;
     bool menuOpen_ = false;
     bool prevEsc_ = false;
+    bool hudOn_ = false;
+    bool benchMode_ = false;
+    int frameLimit_ = 0;
+    bool prevF3_ = false;
+    bool prevF4_ = false;
     TargetResult target_;
 };
 

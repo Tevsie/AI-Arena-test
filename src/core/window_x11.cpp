@@ -171,6 +171,9 @@ using glXSwapBuffersFn = void (*)(x11::Display*, GLXDrawable);
 using glXGetProcAddressFn = void* (*)(const unsigned char*);
 using glXGetProcAddressARBFn = void* (*)(const unsigned char*);
 using glXDestroyContextFn = void (*)(x11::Display*, GLXContext);
+// GLX_EXT_swap_control (drawable-based) and the older SGI/MESA spellings.
+using glXSwapIntervalEXTFn = void (*)(x11::Display*, GLXDrawable, int);
+using glXSwapIntervalFn = int (*)(int);
 }
 
 constexpr int GLX_RGBA = 4;
@@ -252,6 +255,9 @@ struct XLib {
     glx::glXSwapBuffersFn glXSwapBuffers = nullptr;
     glx::glXGetProcAddressFn glXGetProcAddress = nullptr;
     glx::glXDestroyContextFn glXDestroyContext = nullptr;
+    glx::glXSwapIntervalEXTFn glXSwapIntervalEXT = nullptr;
+    glx::glXSwapIntervalFn glXSwapIntervalMESA = nullptr;
+    glx::glXSwapIntervalFn glXSwapIntervalSGI = nullptr;
 
     bool loadAll() {
         // X11
@@ -303,6 +309,9 @@ struct XLib {
             LD2(hGL, glXSwapBuffers, "glXSwapBuffers");
             LD2(hGL, glXGetProcAddress, "glXGetProcAddress");
             LD2(hGL, glXDestroyContext, "glXDestroyContext");
+            LD2(hGL, glXSwapIntervalEXT, "glXSwapIntervalEXT");
+            LD2(hGL, glXSwapIntervalMESA, "glXSwapIntervalMESA");
+            LD2(hGL, glXSwapIntervalSGI, "glXSwapIntervalSGI");
 #undef LD2
         }
         // XRandR (optional): without it the game falls back to borderless
@@ -521,6 +530,19 @@ public:
 
     void swapBuffers() override {
         if (dpy_ && x_.glXSwapBuffers) x_.glXSwapBuffers(dpy_, (glx::GLXDrawable)win_);
+    }
+
+    // vsync control for benchmarking: "0" asks the driver to present as fast as
+    // it can. Any of the three extension spellings will do.
+    bool setSwapInterval(int interval) override {
+        if (!dpy_) return false;
+        if (x_.glXSwapIntervalEXT) {
+            x_.glXSwapIntervalEXT(dpy_, (glx::GLXDrawable)win_, interval);
+            return true;
+        }
+        if (x_.glXSwapIntervalMESA) return x_.glXSwapIntervalMESA(interval) == 0;
+        if (x_.glXSwapIntervalSGI) return x_.glXSwapIntervalSGI(interval) == 0;
+        return false;
     }
 
     void shutdown() override {

@@ -5,6 +5,9 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <set>
+#include <string>
+#include <vector>
 
 #include "src/core/input.hpp"
 #include "src/core/platform.hpp"
@@ -15,6 +18,9 @@
 #include "src/game/player.hpp"
 #include "src/game/settings.hpp"
 #include "src/game/wall.hpp"
+#include "src/render/look.hpp"
+#include "src/render/shaders.hpp"
+#include "src/render/texture.hpp"
 
 using namespace aw;
 
@@ -1537,6 +1543,411 @@ static void testRestart() {
 }
 
 // ---------------------------------------------------------------------------
+// The golden-hour look: one palette, driven by altitude.
+// ---------------------------------------------------------------------------
+static void testLookPalette() {
+    // Keyframes are sorted, and the palette clamps outside their range.
+    int n = 0;
+    const LookKey* keys = lookKeys(n);
+    CHECK(n >= 3);
+    for (int i = 1; i < n; ++i) CHECK(keys[i].altitude > keys[i - 1].altitude);
+    Look lo = lookAtAltitude(-1000.0f);
+    Look hi = lookAtAltitude(100000.0f);
+    CHECK_NEAR(lo.sunIntensity, keys[0].look.sunIntensity, 1e-6);
+    CHECK_NEAR(hi.sunIntensity, keys[n - 1].look.sunIntensity, 1e-6);
+    CHECK_NEAR(lo.fogDensity, keys[0].look.fogDensity, 1e-6);
+
+    // Sun direction stays unit length everywhere (it is used for lighting and
+    // for the visible sun disc at the same time).
+    for (float y = 0.0f; y <= 400.0f; y += 5.0f) {
+        Look L = lookAtAltitude(y);
+        CHECK_NEAR(double(length(L.sunDir)), 1.0, 1e-4);
+    }
+
+    // The story: climbing lifts the sun, thins the air and opens the sky.
+    Look g = lookAtAltitude(0.0f);
+    Look m = lookAtAltitude(100.0f);
+    Look t = lookAtAltitude(320.0f);
+    CHECK(m.sunDir.y > g.sunDir.y);
+    CHECK(t.sunDir.y > m.sunDir.y);
+    CHECK(m.fogDensity < g.fogDensity);
+    CHECK(t.fogDensity < m.fogDensity);
+    CHECK(t.starAmount > m.starAmount);
+    CHECK(g.starAmount < 0.01f);
+    CHECK(t.cloudCover < g.cloudCover);
+    // Ground level is the warm end of the palette.
+    CHECK(g.sunColor.x > g.sunColor.z);
+    CHECK(t.skyZenith.z > t.skyZenith.x);
+}
+
+static void testLookSky() {
+    Look L = lookAtAltitude(100.0f);
+    Vec3 up{0, 1, 0};
+    Vec3 towardSun = L.sunDir;
+    Vec3 away = -L.sunDir;
+
+    Vec3 zenith = skyAirColor(up, L);
+    Vec3 nearSun = skyAirColor(towardSun, L);
+    Vec3 antiSun = skyAirColor(away, L);
+    // The sun's half of the sky is brighter and warmer than the other half.
+    CHECK(nearSun.x + nearSun.y + nearSun.z > antiSun.x + antiSun.y + antiSun.z);
+    CHECK(nearSun.x - nearSun.z > antiSun.x - antiSun.z);
+    // Looking up is cooler/bluer than looking along the horizon at the sun.
+    CHECK(zenith.z / (zenith.x + 1e-4f) > 0.8f);
+    // The full sky adds the sun disc on top of the "air" colour.
+    Vec3 disc = skyColor(towardSun, L);
+    CHECK(disc.x >= nearSun.x);
+    // Haze: looking down/at the horizon is warmer than the zenith.
+    Vec3 down = skyAirColor(Vec3{0.3f, -0.2f, 0.9f}, L);
+    CHECK(down.x > down.z);
+
+    // Aerial perspective: monotone in distance, 0 in front of the camera.
+    CHECK_NEAR(fogAmount(0.0f, L), 0.0, 1e-6);
+    CHECK_NEAR(fogAmount(-10.0f, L), 0.0, 1e-6);
+    float prev = -1.0f;
+    for (float d = 0.0f; d <= 400.0f; d += 10.0f) {
+        float f = fogAmount(d, L);
+        CHECK(f >= prev);
+        prev = f;
+    }
+    CHECK(fogAmount(FAR_PLANE, L) > 0.5f);   // the far wall is measurably hazy
+    CHECK(fogAmount(FAR_PLANE, L) < 1.0f);   // ...but never a flat wall of colour
+
+    // Thinner air at altitude means less haze over the same distance.
+    Look high = lookAtAltitude(320.0f);
+    CHECK(fogAmount(200.0f, high) < fogAmount(200.0f, lookAtAltitude(0.0f)));
+}
+
+// ---------------------------------------------------------------------------
+// Procedural textures: deterministic, tileable, and shaped like stone.
+// ---------------------------------------------------------------------------
+static void testStoneTextures() {
+    TextureSet a = bakeStoneTextures();
+    TextureSet b = bakeStoneTextures();
+    CHECK(a.data.size() == size_t(TextureSet::kLayers) * TextureSet::kSize * TextureSet::kSize * 4);
+    CHECK(a.data == b.data);                       // no RNG state, fully deterministic
+    CHECK(TextureSet::kQuadrant * 2 == TextureSet::kSize);
+
+    // Every stone type is distinct (the wall must not look like one brick type).
+    for (int t = 1; t < TextureSet::kLayers; ++t) {
+        bool differs = false;
+        for (int i = 0; i < TextureSet::kSize * 4; ++i) {
+            if (a.data[size_t(t) * TextureSet::kSize * TextureSet::kSize * 4 + i] !=
+                a.data[size_t(t - 1) * TextureSet::kSize * TextureSet::kSize * 4 + i]) {
+                differs = true;
+                break;
+            }
+        }
+        CHECK(differs);
+    }
+
+    // Mean brightness per quadrant: the face is the brightest tile, the mortar
+    // the darkest (that contrast is what makes the mosaic read).
+    for (int t = 0; t < TextureSet::kLayers; ++t) {
+        double sum[4] = {0, 0, 0, 0};
+        int cnt = 0;
+        for (int y = 0; y < 16; ++y) {
+            for (int x = 0; x < 16; ++x) {
+                float u = (float(x) + 0.5f) / 16.0f, v = (float(y) + 0.5f) / 16.0f;
+                for (int q = 0; q < 4; ++q) {
+                    uint8_t c[4];
+                    a.sample(t, q, u, v, c);
+                    sum[q] += c[0];
+                }
+                ++cnt;
+            }
+        }
+        for (int q = 0; q < 4; ++q) sum[q] /= double(cnt);
+        CHECK(sum[TextureSet::QFace] > sum[TextureSet::QMortar]);
+        CHECK(sum[TextureSet::QFace] > sum[TextureSet::QPitted]);
+        // Every value stays in range (the shader reads it as albedo).
+        CHECK(sum[TextureSet::QMortar] > 0.0);
+    }
+
+    // Height (alpha) is the relief: the mortar quadrant sits *back* from the
+    // face and the pitted tile has deeper holes than the clean one.
+    for (int t = 0; t < TextureSet::kLayers; ++t) {
+        float face = 0.0f, mortar = 0.0f, deepFace = 0.0f, deepPit = 0.0f;
+        for (int y = 0; y < 24; ++y) {
+            for (int x = 0; x < 24; ++x) {
+                float u = (float(x) + 0.5f) / 24.0f, v = (float(y) + 0.5f) / 24.0f;
+                face += a.sampleHeight(t, TextureSet::QFace, u, v);
+                mortar += a.sampleHeight(t, TextureSet::QMortar, u, v);
+                if (a.sampleHeight(t, TextureSet::QFace, u, v) < 0.45f) deepFace += 1.0f;
+                if (a.sampleHeight(t, TextureSet::QPitted, u, v) < 0.45f) deepPit += 1.0f;
+            }
+        }
+        CHECK(mortar < face);
+        CHECK(deepPit >= deepFace);
+    }
+
+    // Profiles: ids are dense and every one is usable by the shader.
+    CHECK(brickProfileCount() == TextureSet::kLayers);
+    for (int t = 0; t < brickProfileCount(); ++t) {
+        BrickProfile p = brickProfile(t);
+        CHECK(p.tint[0] > 0.3f && p.tint[0] < 1.4f);
+        CHECK(p.relief >= 0.0f && p.relief <= 1.0f);
+        CHECK(p.roughness > 0.0f && p.roughness <= 1.0f);
+        CHECK(p.speckle >= 0.0f && p.speckle <= 1.0f);
+        CHECK(p.stain >= 0.0f && p.stain <= 1.0f);
+    }
+
+    // Every shade byte the generator can produce maps to a valid profile, and
+    // all profiles are actually reachable (otherwise a stone type never appears).
+    bool used[8] = {false, false, false, false, false, false, false, false};
+    for (int s8 = 0; s8 < 256; ++s8) {
+        int t = brickTypeFromShade(s8);
+        CHECK(t >= 0 && t < brickProfileCount());
+        used[t] = true;
+    }
+    for (int t = 0; t < brickProfileCount(); ++t) CHECK(used[t]);
+
+    // The generator's hash really is spread over the whole byte range, which is
+    // what feeds that distribution (and the per-brick tone/weathering).
+    int buckets[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    for (int bx = 0; bx < 64; ++bx)
+        for (int by = 0; by < 64; ++by)
+            ++buckets[brickTypeFromShade(int((hash2d(bx, by) >> 20) & 0xFF))];
+    for (int i = 0; i < 8; ++i) CHECK(buckets[i] > 0);
+
+    // Value noise tiles: the lattice wraps, so a baked texture has no seam.
+    for (int i = 0; i < 8; ++i) {
+        float x = 0.37f * float(i) + 0.11f;
+        CHECK_NEAR(texValueNoise(x, 2.5f, 8, 7u),
+                   texValueNoise(x + 8.0f, 2.5f, 8, 7u), 1e-5);
+        CHECK_NEAR(texValueNoise(1.25f, x, 8, 7u),
+                   texValueNoise(1.25f, x + 8.0f, 8, 7u), 1e-5);
+    }
+    CHECK_NEAR(texValueNoise(0.5f, 0.5f, 4, 3u), 0.5f, 0.75f);   // in range
+
+    // The wall body tile is baked too, and its mortar is set back.
+    std::vector<uint8_t> wall = bakeWallBody();
+    CHECK(wall.size() == size_t(TextureSet::kSize) * TextureSet::kSize * 4);
+    double lum = 0.0;
+    int lit = 0;
+    for (size_t i = 0; i < wall.size(); i += 4) {
+        lum += wall[i];
+        if (wall[i] > 40) ++lit;
+    }
+    CHECK(lum / double(wall.size() / 4) > 20.0);
+    CHECK(lit > 0);
+
+    // The shader's profile table is generated from the same data, so every id
+    // appears in the GLSL the driver compiles.
+    std::string glsl = brickProfileGLSL();
+    CHECK(glsl.find("stoneProfile") != std::string::npos);
+    for (int t = 1; t < brickProfileCount(); ++t) {
+        char want[24];
+        std::snprintf(want, sizeof(want), "if (t == %d)", t);
+        CHECK(glsl.find(want) != std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GLSL structural checks.
+//
+// The look shaders can only be compiled by a driver, so the unit tests do the
+// next best thing and check the invariants a failed compile would break:
+// balanced braces, every u-prefixed uniform actually declared, and the vertex /
+// fragment varying interfaces agreeing name-for-name and type-for-type. This
+// catches the realistic failure mode (a typo or a renamed varying that only
+// shows up as "the game looks flat on one driver").
+// ---------------------------------------------------------------------------
+static std::string stripComments(const std::string& src) {
+    std::string out;
+    for (size_t i = 0; i < src.size(); ++i) {
+        if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '/') {
+            while (i < src.size() && src[i] != '\n') ++i;
+        } else if (src[i] == '/' && i + 1 < src.size() && src[i + 1] == '*') {
+            i += 2;
+            while (i + 1 < src.size() && !(src[i] == '*' && src[i + 1] == '/')) ++i;
+            ++i;
+        } else {
+            out.push_back(src[i]);
+        }
+    }
+    return out;
+}
+
+static bool balanced(const std::string& src, char open, char close) {
+    int depth = 0;
+    for (char c : src) {
+        if (c == open) ++depth;
+        else if (c == close) { --depth; if (depth < 0) return false; }
+    }
+    return depth == 0;
+}
+
+// "uniform vec3 uSunDir;" / "out vec3 vWorld;" -> ("vec3 uSunDir")
+static void collectDecls(const std::string& src, const char* qualifier,
+                         std::set<std::string>& out) {
+    std::string q = std::string(qualifier) + " ";
+    size_t pos = 0;
+    while ((pos = src.find(q, pos)) != std::string::npos) {
+        // Only at a statement start (not inside a word like "inout").
+        bool atStart = pos == 0 || src[pos - 1] == '\n' || src[pos - 1] == ' ' ||
+                       src[pos - 1] == ';' || src[pos - 1] == '{' || src[pos - 1] == '}';
+        size_t end = src.find(';', pos);
+        if (!atStart || end == std::string::npos) { pos += q.size(); continue; }
+        std::string decl = src.substr(pos + q.size(), end - pos - q.size());
+        // Drop precision qualifiers and array suffixes are kept as-is.
+        while (!decl.empty() && (decl.front() == ' ' || decl.front() == '\t')) decl.erase(0, 1);
+        while (!decl.empty() && (decl.back() == ' ' || decl.back() == '\t')) decl.pop_back();
+        // Only real declarations ("out vec3 vWorld;") — not the "out" parameters
+        // of a function signature, which would run to the next semicolon.
+        bool shapeOk = !decl.empty() && decl.find('#') == std::string::npos &&
+                       decl.find('(') == std::string::npos &&
+                       decl.find(')') == std::string::npos &&
+                       decl.find(',') == std::string::npos &&
+                       decl.find('{') == std::string::npos &&
+                       decl.size() < 64;
+        if (shapeOk) out.insert(decl);
+        pos = end;
+    }
+}
+
+// Every identifier of the form uSomething must be a declared uniform: it is the
+// kind of typo that silently disables a feature.
+static void checkUniformNames(const std::string& src, const char* label) {
+    std::set<std::string> uniforms;
+    {
+        std::string q = "uniform ";
+        size_t pos = 0;
+        while ((pos = src.find(q, pos)) != std::string::npos) {
+            size_t end = src.find(';', pos);
+            if (end == std::string::npos) break;
+            std::string decl = src.substr(pos + q.size(), end - pos - q.size());
+            size_t sp = decl.rfind(' ');
+            if (sp != std::string::npos) uniforms.insert(decl.substr(sp + 1));
+            pos = end;
+        }
+    }
+    CHECK(!uniforms.empty());
+    size_t pos = 0;
+    int checked = 0;
+    while (pos < src.size()) {
+        if (src[pos] == 'u' && pos + 1 < src.size() && src[pos + 1] >= 'A' && src[pos + 1] <= 'Z') {
+            size_t e = pos + 1;
+            while (e < src.size() && (std::isalnum((unsigned char)src[e]) || src[e] == '_')) ++e;
+            std::string name = src.substr(pos, e - pos);
+            // Skip words that merely start with a capital after a 'u' inside a
+            // longer identifier (e.g. "awUniform").
+            bool standalone = pos == 0 || !(std::isalnum((unsigned char)src[pos - 1]) ||
+                                            src[pos - 1] == '_');
+            if (standalone) {
+                ++checked;
+                if (uniforms.find(name) == uniforms.end()) {
+                    fprintf(stderr, "FAIL %s: uniform %s is used but never declared\n",
+                            label, name.c_str());
+                    CHECK(false);
+                }
+            }
+            pos = e;
+        } else {
+            ++pos;
+        }
+    }
+    CHECK(checked > 0);
+}
+
+static void testShaderSources() {
+    // buildSrc(), exactly as the renderer concatenates it.
+    auto build = [](const char* body) {
+        return stripComments(std::string("#version 330 core\n") + lookGLSL() +
+                             brickProfileGLSL() + body);
+    };
+
+    const std::string brickVS = build(shaders::kBrickVS);
+    const std::string brickFS = build(shaders::kBrickFS);
+    const std::string skyFS = build(shaders::kSkyFS);
+    const std::string wallVS = build(shaders::kWallVS);
+    const std::string wallFS = build(shaders::kWallFS);
+    const std::string brightFS = build(shaders::kBrightFS);
+    const std::string blurFS = build(shaders::kBlurFS);
+    const std::string postFS = build(shaders::kPostFS);
+
+    for (const auto* pair : {&brickVS, &brickFS, &skyFS, &wallVS, &wallFS, &brightFS, &blurFS,
+                             &postFS}) {
+        CHECK(!pair->empty());
+        CHECK(pair->find("#version 330 core") == 0);
+        CHECK(balanced(*pair, '{', '}'));
+        CHECK(balanced(*pair, '(', ')'));
+        CHECK(pair->find("GLSL") == std::string::npos);   // no stray raw-string markers
+        checkUniformNames(*pair, "shader");
+    }
+
+    // Vertex -> fragment interfaces must agree exactly (this is what a driver
+    // rejects with "varying not declared in the fragment shader").
+    auto varyingsMatch = [](const std::string& vs, const std::string& fs, const char* who) {
+        std::set<std::string> outs, ins;
+        collectDecls(vs, "out", outs);
+        collectDecls(fs, "in", ins);
+        outs.erase("vec4 fragColor");
+        for (const std::string& d : outs) {
+            if (ins.find(d) == ins.end()) {
+                fprintf(stderr, "FAIL %s: vertex output [%s] has no matching fragment input\n",
+                        who, d.c_str());
+                CHECK(false);
+            }
+        }
+        for (const std::string& d : ins) {
+            if (outs.find(d) == outs.end()) {
+                fprintf(stderr, "FAIL %s: fragment input [%s] has no matching vertex output\n",
+                        who, d.c_str());
+                CHECK(false);
+            }
+        }
+        return !outs.empty();
+    };
+    CHECK(varyingsMatch(brickVS, brickFS, "brick"));
+    CHECK(varyingsMatch(wallVS, wallFS, "wall"));
+
+    // The shared look block must declare everything the shaders read, and the
+    // C++ lookup list must name the same uniforms (a rename on one side only
+    // would silently leave a default value in place).
+    std::string look = stripComments(lookGLSL());
+    std::string all = look + brickVS + brickFS + skyFS + wallVS + wallFS + brightFS + blurFS +
+                      postFS;
+    const char* names[] = {"uSunDir", "uSunColor", "uSkyZenith", "uSkyHorizon", "uSkyGround",
+                           "uHazeColor", "uSunIntensity", "uAmbientSky", "uAmbientGround",
+                           "uSpecular", "uRimStrength", "uHazeStrength", "uCloudCover",
+                           "uStarAmount", "uFogDensity", "uFogSkyMix", "uExposure",
+                           "uBloomStrength", "uBloomThreshold", "uVignette", "uGrain",
+                           "uTime", "uCamPos"};
+    for (const char* n : names) {
+        const std::string name(n);
+        // Exactly one declaration, on a "uniform ..." line of the shared block.
+        int decls = 0;
+        size_t pos = 0;
+        while ((pos = look.find(name, pos)) != std::string::npos) {
+            size_t lineStart = look.rfind('\n', pos);
+            lineStart = lineStart == std::string::npos ? 0 : lineStart + 1;
+            if (look.compare(lineStart, 7, "uniform") == 0) ++decls;
+            pos += name.size();
+        }
+        CHECK(decls == 1);
+        // ... and consumed at least once somewhere (prefix helper or a body): a
+        // declared-but-unused uniform is stripped, its location comes back -1 and
+        // the renderer silently skips it, so the feature would quietly do nothing.
+        int uses = 0;
+        pos = 0;
+        while ((pos = all.find(name, pos)) != std::string::npos) { ++uses; pos += name.size(); }
+        CHECK(uses >= 2);
+    }
+
+    // The generated profile table must be valid GLSL shape: one function, one
+    // branch per stone type, and every branch assigning all five outputs.
+    std::string prof = brickProfileGLSL();
+    CHECK(balanced(prof, '{', '}'));
+    CHECK(prof.find("void stoneProfile(int t, out vec3 tint, out float relief, out float rough,")
+          != std::string::npos);
+    int branches = 0;
+    size_t pos = 0;
+    while ((pos = prof.find("if (t == ", pos)) != std::string::npos) { ++branches; ++pos; }
+    CHECK(branches == brickProfileCount() - 1);
+}
+
+// ---------------------------------------------------------------------------
 int main() {
     testGrid();
     testMosaic();
@@ -1560,6 +1971,10 @@ int main() {
     testDisplayModeApply();
     testGameDisplayFlow();
     testRestart();
+    testLookPalette();
+    testLookSky();
+    testStoneTextures();
+    testShaderSources();
 
     fprintf(stderr, "\n[aw-tests] %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

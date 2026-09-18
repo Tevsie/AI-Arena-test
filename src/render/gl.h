@@ -56,6 +56,7 @@ enum : GLenum {
     GL_CW                 = 0x0900,
     GL_TEXTURE_2D         = 0x0DE1,
     GL_TEXTURE0            = 0x84C0,
+    GL_TEXTURE1            = 0x84C1,
     GL_UNSIGNED_BYTE      = 0x1401,
     GL_UNSIGNED_SHORT     = 0x1403,
     GL_UNSIGNED_INT       = 0x1405,
@@ -111,6 +112,13 @@ enum : GLenum {
     GL_DRAW_FRAMEBUFFER   = 0x8CA9,
     // ARB_instanced_arrays
     GL_VERTEX_ATTRIB_ARRAY_DIVISOR_ARB = 0x88FE,
+    // 2D array textures (procedural stone layers) + mipmaps
+    GL_TEXTURE_2D_ARRAY   = 0x8C1A,
+    GL_TEXTURE_WRAP_R     = 0x8072,
+    GL_TEXTURE_BASE_LEVEL = 0x813C,
+    GL_TEXTURE_MAX_LEVEL  = 0x813D,
+    GL_LINEAR_MIPMAP_LINEAR = 0x2703,
+    GL_UNPACK_ALIGNMENT   = 0x0CF5,
 };
 
 // ---------------------------------------------------------------------------
@@ -181,6 +189,11 @@ struct GL {
     void (*TexImage2D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void*) = nullptr;
     void (*TexParameteri)(GLenum, GLenum, GLint) = nullptr;
     void (*ActiveTexture)(GLenum) = nullptr;
+    void (*PixelStorei)(GLenum, GLint) = nullptr;
+    void (*GenerateMipmap)(GLenum) = nullptr;
+    void (*TexImage3D)(GLenum, GLint, GLint, GLsizei, GLsizei, GLsizei, GLint, GLenum,
+                       GLenum, const void*) = nullptr;
+    bool hasTexArray = false;   // optional group: glTexImage3D + glGenerateMipmap
 
     // uniform buffers
     void (*BindBufferBase)(GLenum, GLuint, GLuint) = nullptr;
@@ -325,6 +338,13 @@ bool loadGL(F&& loader) {
         reinterpret_cast<decltype(gl.CheckFramebufferStatus)>(loader("glCheckFramebufferStatus"));
     gl.hasFBO = gl.GenFramebuffers && gl.DeleteFramebuffers && gl.BindFramebuffer &&
                 gl.FramebufferTexture2D && gl.CheckFramebufferStatus;
+
+    // optional group: 2D array textures + mipmap generation (procedural stone).
+    // Without them the renderer keeps the flat legacy shading.
+    gl.PixelStorei = reinterpret_cast<decltype(gl.PixelStorei)>(loader("glPixelStorei"));
+    gl.GenerateMipmap = reinterpret_cast<decltype(gl.GenerateMipmap)>(loader("glGenerateMipmap"));
+    gl.TexImage3D = reinterpret_cast<decltype(gl.TexImage3D)>(loader("glTexImage3D"));
+    gl.hasTexArray = gl.GenerateMipmap && gl.TexImage3D && gl.BindTexture && gl.TexParameteri;
 
     gl.DebugMessageCallbackARB =
         reinterpret_cast<decltype(gl.DebugMessageCallbackARB)>(loader("glDebugMessageCallback"));

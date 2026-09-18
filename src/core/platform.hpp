@@ -198,6 +198,14 @@ public:
 
     // GL function loading (no-op on headless). Returns nullptr if not loaded.
     virtual void* loadGLProc(const char* name) = 0;
+
+    // Ask the driver for a swap interval (0 = no vsync). Backends without a
+    // swap-control extension return false; that is not an error, it just means
+    // frame times stay capped by the driver (see --novsync / --bench).
+    virtual bool setSwapInterval(int interval) {
+        (void)interval;
+        return false;
+    }
 };
 
 // Factory selected by the build configuration (see main.cpp). Tries the

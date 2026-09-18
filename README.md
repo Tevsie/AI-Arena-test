@@ -90,6 +90,8 @@ back to headless mode and prints a status line.
 | **Left mouse**   | **Pull** target brick outward (click, 3 s lerp) |
 | **Right mouse**  | **Push** target brick back flush (click, 3 s lerp) |
 | `Esc`            | Settings menu (pause)                   |
+| `F3`             | Diagnostics overlay (fps, ms, look)     |
+| `F4`             | Toggle bloom / tonemap (A/B the look)   |
 
 The center-screen crosshair turns **green** when a brick is in reach. You
 cannot push a brick you are currently standing on.
@@ -218,5 +220,17 @@ tests/           dependency-free unit tests (grid, store, streaming,
 - **Deterministic demos**: `make demo` (or `./build/atw --headless --frames N`)
   steps at a fixed 60 Hz and prints `fps / frame ms / chunks / instances /
   modified bricks / peak height` every second.
-- The renderer intentionally trades visual fidelity (flat-shaded bricks, no
-  textures, one directional light, baked AO) for raw throughput, per the GDD.
+- **Golden-hour ruin look**, entirely procedural: one palette (`src/render/look.hpp`)
+  drives the sun, the sky, the fog and the grade, and the whole thing shifts with
+  altitude (warm haze and a low sun at the ground, clear golden hour mid-climb,
+  thin cold air with stars high up). Bricks carry code-baked stone textures
+  (8 stone types, mortar / clean / pitted / stained tiles, height-field bump
+  occlusion), distance fades into the sky behind it, and a bloom + ACES tonemap
+  pass finishes the frame. **No asset files**: every texture is generated in code
+  at startup, the `.exe` stays self-contained. Tuning lives in `lookKeys()`.
+- **Measuring it**: `atw --bench --novsync --frames 1800` runs the scripted camera
+  path (the same one headless mode uses, so runs are comparable) and reports
+  avg / p50 / p95 / worst frame times; `F3` shows the same numbers live, `F4`
+  toggles the post pass, `--no-post` / `--hud` start with them off/on. If a driver
+  rejects a look shader the renderer falls back to the legacy flat shading and
+  logs the GLSL error instead of failing to start.

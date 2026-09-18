@@ -1,8 +1,10 @@
 // game.cpp — game orchestration and the main loop.
 #include "game.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <vector>
 
 #include "../core/input.hpp"
 #include "../render/gl.h"
@@ -397,8 +399,23 @@ void Game::run() {
 
     int frameCount = 0;
     double reportT = nowSeconds();
+    // --bench collects raw per-frame times (see setBenchMode).
+    std::vector<double> benchMs;
+    if (benchMode_) benchMs.reserve(4096);
+    double benchPrev = nowSeconds();
+
+    // Returns true when the run is over (frame limit reached).
+    auto frameLimitReached = [&]() {
+        return frameLimit_ > 0 && stats_.frame >= frameLimit_;
+    };
 
     while (true) {
+        if (frameLimitReached()) break;
+        if (benchMode_) {
+            double t = nowSeconds();
+            if (stats_.frame > 0) benchMs.push_back((t - benchPrev) * 1000.0);
+            benchPrev = t;
+        }
         // Headless mode uses a fixed 60 Hz step (deterministic, benchmarkable);
         // interactive mode steps by wall-clock delta time (uncapped frame rate).
         float dt;
@@ -430,6 +447,24 @@ void Game::run() {
         }
         prevEsc_ = esc;
 
+        // F3 toggles the diagnostics overlay, F4 the bloom/tonemap post pass
+        // (a quick A/B between the graded and the raw image).
+        if (!headless() && !modalActive) {
+            bool f3 = in.keys[KEY_F3] != 0;
+            if (f3 && !prevF3_) {
+                hudOn_ = !hudOn_;
+                fprintf(stderr, "[aw] hud %s\n", hudOn_ ? "on" : "off");
+            }
+            prevF3_ = f3;
+            bool f4 = in.keys[KEY_F4] != 0;
+            if (f4 && !prevF4_) {
+                renderer_.setPostEnabled(!renderer_.postEnabled());
+                fprintf(stderr, "[aw] post-processing %s\n",
+                        renderer_.postEnabled() ? "on" : "off");
+            }
+            prevF4_ = f4;
+        }
+
         const bool menuWasOpen = menuOpen_;
         if (menuWasOpen) {
             updateMenuFrame(in, modalActive);
@@ -439,7 +474,9 @@ void Game::run() {
             int cw = 0, ch = 0;
             if (platform_->clientSize(cw, ch)) { in.width = cw; in.height = ch; }
         } else {
-            if (headless()) demoDrive(dt);
+            // The bench drives the same scripted path as headless mode, so runs
+            // on different machines (or settings) stay comparable.
+            if (headless() || benchMode_) demoDrive(dt);
 
             bool wasGrounded = player_.grounded;
             simulateFrame(in, dt);
@@ -463,12 +500,14 @@ void Game::run() {
             Mat4 vp = proj * view;
             int renderW = 0, renderH = 0;
             renderSizeFor(in.width, in.height, renderW, renderH);   // render scaling
+            renderer_.setTime(float(stats_.elapsed));   // drifting clouds, twinkling stars
             stats_.drawnInstances = renderer_.render(wall_, player_, vp, aspect, in.width,
                                                      in.height, renderW, renderH, fov);
             // Overlays (crosshair, menu, modal dialog) always draw at the window
             // resolution, so text stays crisp at any render scale.
             renderer_.uiBegin(in.width, in.height);
             renderer_.uiCrosshair(platform_->uiScale(), target_.hit);
+            if (hudOn_) drawHud();
             if (menuOpen_) menu_.render(renderer_);
             displayConfirm_.render(renderer_);
             renderer_.uiEnd();
@@ -490,6 +529,73 @@ void Game::run() {
             frameCount = 0;
             reportT = t;
         }
+    }
+
+    if (benchMode_ && !benchMs.empty()) {
+        std::vector<double> sorted = benchMs;
+        std::sort(sorted.begin(), sorted.end());
+        auto pct = [&](double p) {
+            size_t i = size_t(p * double(sorted.size() - 1) + 0.5);
+            return sorted[i < sorted.size() ? i : sorted.size() - 1];
+        };
+        double sum = 0.0;
+        for (double v : benchMs) sum += v;
+        double avg = sum / double(benchMs.size());
+        stats_.benchP50 = pct(0.50);
+        stats_.benchP95 = pct(0.95);
+        stats_.benchWorst = sorted.back();
+        stats_.benchFrames = int(benchMs.size());
+        fprintf(stderr,
+                "[aw] bench: frames=%d  avg=%6.2f ms (%5.1f fps)  p50=%6.2f  p95=%6.2f  "
+                "worst=%6.2f ms\n",
+                stats_.benchFrames, avg, avg > 0.0 ? 1000.0 / avg : 0.0, stats_.benchP50,
+                stats_.benchP95, stats_.benchWorst);
+        fprintf(stderr,
+                "[aw] bench: note — vsync/window compositing caps frame times; use "
+                "--novsync for uncapped numbers\n");
+    }
+}
+
+// ---- F3 diagnostics overlay ------------------------------------------------
+// Small, unobtrusive, and drawn with the embedded font only (no assets). It is
+// the window into what the look pipeline is doing: frame time, how much of the
+// wall is on screen, the altitude and the palette that altitude picked.
+void Game::drawHud() {
+    const Look& L = renderer_.look();
+    const int W = 0;   // placeholder to keep the padding below obvious
+    (void)W;
+    char line[8][64];
+    float sunDeg = std::asin(clampf(L.sunDir.y, -1.0f, 1.0f)) * 57.29578f;
+    std::snprintf(line[0], sizeof(line[0]), "FPS %5.1f  %5.2f MS",
+                  stats_.fps, stats_.frameMs);
+    std::snprintf(line[1], sizeof(line[1]), "CHUNKS %2d  INST %6d",
+                  stats_.residentChunks, stats_.drawnInstances);
+    std::snprintf(line[2], sizeof(line[2]), "ALT %5.0f  SUN %4.1f DEG",
+                  double(player_.eye().y), double(sunDeg));
+    std::snprintf(line[3], sizeof(line[3]), "FOG %.4f  STARS %.2f",
+                  double(L.fogDensity), double(L.starAmount));
+    std::snprintf(line[4], sizeof(line[4]), "LOOK %s  POST %s",
+                  renderer_.lookPipeline() ? "GOLDEN" : "LEGACY",
+                  renderer_.postEnabled() ? "ON" : "OFF");
+    std::snprintf(line[5], sizeof(line[5]), "BRICKS %4d  MODS %4d",
+                  stats_.residentChunks > 0 ? stats_.residentChunks * CHUNK_BRICKS : 0,
+                  stats_.modifiedBricks);
+    std::snprintf(line[6], sizeof(line[6]), "GRID %4d %4d",
+                  int(player_.pos.x), int(player_.pos.y));
+    std::snprintf(line[7], sizeof(line[7]), "F3 HUD   F4 POST   ESC MENU");
+
+    int scale = platform_->uiScale() >= 1.5f ? 2 : 1;
+    const float cw = 6.0f * float(scale), ch = 8.0f * float(scale);
+    float x = 10.0f, y = 10.0f;
+    float w = 0.0f;
+    for (int i = 0; i < 8; ++i) {
+        float lw = float(std::strlen(line[i])) * cw;
+        if (lw > w) w = lw;
+    }
+    renderer_.uiRect(x - 6.0f, y - 6.0f, w + 12.0f, ch * 8.0f + 12.0f, 0.02f, 0.02f, 0.03f, 0.55f);
+    for (int i = 0; i < 8; ++i) {
+        float a = i == 7 ? 0.55f : 0.92f;
+        renderer_.uiText(x, y + float(i) * (ch + 3.0f), scale, 0.95f, 0.90f, 0.78f, a, line[i]);
     }
 }
 

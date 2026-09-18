@@ -161,6 +161,11 @@ uint32_t vkToKey(WPARAM vk) {
         case VK_RIGHT:   return KEY_RIGHT;
         case VK_UP:      return KEY_UP;
         case VK_DOWN:    return KEY_DOWN;
+        // Function keys fold to the X11 scheme (XK_F1 = 0xFFBE -> 0x1BE).
+        case VK_F1: case VK_F2: case VK_F3: case VK_F4:
+        case VK_F5: case VK_F6: case VK_F7: case VK_F8:
+        case VK_F9: case VK_F10: case VK_F11: case VK_F12:
+            return 0x100 + (0xbe + (uint32_t(vk) - uint32_t(VK_F1)));
         default:         return uint32_t(vk) & 0xFF;
     }
 }
@@ -488,6 +493,30 @@ public:
         void* p = reinterpret_cast<void*>(wglGetProcAddress(name));
         if (!p && hGL_) p = reinterpret_cast<void*>(GetProcAddress(hGL_, name));
         return p;
+    }
+
+    // vsync control for benchmarking (WGL_EXT_swap_control). Returns false when
+    // the driver does not expose it, which simply leaves the default in place.
+    bool setSwapInterval(int interval) override {
+        using SwapIntervalFn = BOOL (WINAPI*)(int);
+        static SwapIntervalFn fn = nullptr;
+        static bool tried = false;
+        if (!tried) {
+            tried = true;
+            // The extension list comes from the loaded GL table (populated by
+            // the shared loader for the 1.1 entry points).
+            bool have = false;
+            if (gl.GetString) {
+                const char* ext = reinterpret_cast<const char*>(gl.GetString(GL_EXTENSIONS));
+                for (const char* p = ext; p && *p; ++p) {
+                    if (std::strncmp(p, "WGL_EXT_swap_control", 20) == 0) { have = true; break; }
+                }
+            }
+            if (have) fn = reinterpret_cast<SwapIntervalFn>(loadGLProc("wglSwapIntervalEXT"));
+        }
+        if (!fn) return false;
+        fn(interval);
+        return true;
     }
 
 private:
