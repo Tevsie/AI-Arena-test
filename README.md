@@ -113,7 +113,7 @@ The in-game menu (mouse or `↑ ↓ ← →` + `Enter`) offers:
 
 | Mode           | Window                                | Resolution row                                    |
 |----------------|---------------------------------------|---------------------------------------------------|
-| `WINDOWED`     | Real window with borders, client area = the selected size, re-centred on the monitor **every time you change the resolution** | Window **client size** — always a standard size: 1280×720 (HD), 1600×900 (HD+), 1920×1080 (Full HD), 2560×1440 (QHD), 3840×2160 (4K), filtered to what your screen can show. A leftover non-standard value from an older version (e.g. 1003×986) is snapped to the largest standard size that fits |
+| `WINDOWED`     | Real window with borders, client area = the selected size, re-centred on the monitor **every time you change the resolution** | **Every** standard resolution — 1280×720 (HD), 1600×900 (HD+), 1920×1080 (Full HD), 2560×1440 (QHD), 3840×2160 (4K) — whatever your screen is. If the window cannot be that large it is fitted to the screen (never bigger than the desktop) and the setting keeps the standard value you picked |
 | `BORDERLESS`   | Borderless window covering the whole monitor at its native resolution (no mode switch, instant `Alt+Tab`) | **Render resolution**: the 3D scene is drawn at this size and upscaled to the window; the UI, menu and crosshair always render at native window resolution, so text stays crisp. The chosen preset keeps its pixel budget but takes the monitor's shape, so upscaling never stretches the image |
 | `EXCLUSIVE`    | Driver mode switch (`ChangeDisplaySettingsEx` / XRandR): real hardware resolution + refresh rate | Strictly the modes your driver reports for this display (lowest → highest) |
 
@@ -126,12 +126,16 @@ screen. One action is one dialog: the confirmation appears once per change (the
 key that dismisses it cannot immediately repeat the change underneath), and no
 new change can start while the countdown is running.
 
-Windowed mode always fits your monitor: the picker only offers standard sizes
-that the work area (screen minus taskbar and window decorations) can really
-show, a saved `settings.cfg` size is fitted down at startup, and the window is
-re-fitted — and re-centred — if you move it to another display, change the
-desktop resolution, or pick another size (a maximized window is restored first,
-because a maximized window cannot be sized or moved). On Windows the process declares
+Windowed mode always fits your monitor: a resolution your screen cannot show is
+*fitted* to the work area (screen minus taskbar and window decorations) while the
+standard value stays in the menu and in `settings.cfg` — so picking Full HD or 4K
+on a smaller screen gives you the largest window that fits instead of one that
+hangs off the desktop, and the window grows back up to your resolution when you
+move it to a bigger display. Non-standard leftovers from older builds (a saved
+`1003×986`, say) snap to the closest standard resolution. The window is
+re-fitted — and re-centred — whenever you change the resolution, move it to
+another display or change the desktop resolution (a maximized window is restored
+first, because a maximized window cannot be sized or moved). On Windows the process declares
 per-monitor DPI awareness *before* the window is created, so the client area,
 the GL viewport and the mouse coordinates are all in real screen pixels —
 otherwise a scaled (125 %/150 %) display makes windows physically larger than

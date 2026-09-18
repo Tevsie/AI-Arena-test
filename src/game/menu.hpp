@@ -12,10 +12,11 @@
 //     a blind screen (see display_confirm.hpp).
 //
 // Resolution rows are list driven and depend on the display mode:
-//   Windowed   "WINDOW SIZE"  — standard client sizes (HD..4K) that fit the
-//                               desktop minus decorations/taskbar; a leftover
-//                               non-standard value is snapped to the largest
-//                               standard size the screen can show.
+//   Windowed   "WINDOW SIZE"  — all standard client sizes (HD..4K); a size the
+//                               screen cannot show is fitted to the screen by
+//                               the backend (the setting keeps the standard
+//                               value). Non-standard leftovers snap onto the
+//                               closest standard resolution.
 //   Borderless "RENDER RES"   — internal 3D render resolution (up to 4K, above
 //                               native = supersampling) with a scale percentage;
 //                               the window itself stays at the native size.
@@ -202,6 +203,9 @@ public:
         }
     }
 
+    // Number of entries in the resolution row (list depends on the display mode).
+    int resolutionCount() const { return resCount_; }
+
     // Centre of a row or button in window pixels (from the last layout).
     void itemCenter(int item, float& x, float& y) const {
         const Layout& L = layout_;
@@ -272,12 +276,11 @@ private:
     void fillResolutionList(const Settings& s, Platform& p) {
         resCount_ = 0;
         switch (s.mode) {
-            case DisplayMode::Windowed: {
-                int aw = 0, ah = 0;
-                p.maxWindowSize(aw, ah);
-                resCount_ = Settings::windowModes(resolutions_, Settings::kMaxModes, aw, ah);
+            case DisplayMode::Windowed:
+                // All standard resolutions (HD .. 4K); one that the screen cannot
+                // show is fitted to the screen by the backend.
+                resCount_ = Settings::windowModes(resolutions_, Settings::kMaxModes);
                 break;
-            }
             case DisplayMode::Borderless: {
                 int nw = 0, nh = 0;
                 p.monitorSize(nw, nh);
@@ -298,8 +301,6 @@ private:
             }
         }
     }
-
-    int resolutionCount() const { return resCount_; }
 
     // ---------------------------------------------------------------- layout
     void computeLayout(int w, int h, float wantedScale) {

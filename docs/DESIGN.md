@@ -109,17 +109,20 @@ fully testable and benchmarkable on machines without a display or GPU.
   its lists from the backend (`Settings::windowModes`, `renderModes`,
   `exclusiveModes`, `refreshRates`) and only ever edits `Settings`; `Game`
   applies the result, so the UI has no platform-specific code.
-  - **Windowed**: monitor aware (`Platform::maxWindowSize`) and *standard*:
-    only HD/HD+/Full HD/QHD/4K presets that the work area can show are offered
-    (`Settings::windowModes`), and `Settings::fitToMonitor` snaps any other value
-    (an older build's "largest window that fits", e.g. 1003x986, or a size saved
-    on a bigger monitor) to the largest standard one this screen supports, so a
-    made-up resolution is never applied *and* the setting always agrees with the
-    real client area (a mismatch re-triggered an apply). `Game::requestDisplayApply`
-    snaps before the backend is asked, `Platform::resize` still clamps as a last
-    resort, and the window is re-centred on the monitor by every change
-    (`PlatformWin32::placeWindowed` / X11 `resize` via `centerWindowIn`), leaving
-    a maximized state first because a maximized window ignores size/move.
+  - **Windowed**: monitor aware (`Platform::maxWindowSize`) and *standard*: all
+    five HD/HD+/Full HD/QHD/4K presets are selectable (`Settings::windowModes`,
+    no monitor filtering), because the size is what the user asks the client area
+    to be — `Settings::snapToStandard` only converts non-standard values (an older
+    build's "largest window that fits", e.g. 1003x986, 1902x983) to the closest
+    standard resolution by area. When the screen cannot show the chosen size the
+    *window* is fitted to the work area by the backend while the setting keeps the
+    standard value (`PlatformWin32::init`/`resize`, X11 `resize`), and the backend
+    remembers the request (`reqW_`/`reqH_`) so moving the window to a bigger
+    display re-fits it up to the requested resolution. `Platform::resize` therefore
+    never rewrites the setting into a made-up size, and the window is re-centred on
+    the monitor by every change (`PlatformWin32::placeWindowed` / X11 `resize` via
+    `centerWindowIn`), leaving a maximized state first because a maximized window
+    ignores size/move.
   - **Borderless**: the window is locked to the monitor's native resolution
     (`WS_POPUP` + monitor rect on Win32, `_NET_WM_STATE_FULLSCREEN` on X11) and
     the resolution row becomes a *render scale*: `Game::renderSizeFor` feeds the

@@ -560,47 +560,39 @@ static void testRenderAspectFit() {
 static void testDisplayModeLists() {
     Resolution modes[Settings::kMaxModes];
 
-    // ---- windowed: only the standard sizes that fit ------------------------
-    int n = Settings::windowModes(modes, Settings::kMaxModes, 0, 0);
-    CHECK(n == Settings::kPresetCount);                       // monitor unknown
-    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2160);  // up to 4K
-    // 4K desktop minus decorations: 4K no longer fits, 1440p is the largest.
-    n = Settings::windowModes(modes, Settings::kMaxModes, 3840, 2120);
-    CHECK(n == Settings::kPresetCount - 1);
-    CHECK(modes[n - 1].w == 2560 && modes[n - 1].h == 1440);
-    // 1080p screen with a taskbar and window frame: 1440p/4K are dropped, and
-    // because a 1920x1080 *window* cannot fit a 1902x1003 work area the list
-    // ends at 1600x900 -- no made-up "1902x1003" entry.
-    n = Settings::windowModes(modes, Settings::kMaxModes, 1902, 1003);
-    CHECK(n == 2);
-    CHECK(modes[n - 1].w == 1600 && modes[n - 1].h == 900);
+    // ---- windowed: every standard resolution is selectable ------------------
+    int n = Settings::windowModes(modes, Settings::kMaxModes);
+    CHECK(n == Settings::kPresetCount);
+    CHECK(modes[0].w == 1280 && modes[0].h == 720);            // HD
+    CHECK(modes[n - 1].w == 3840 && modes[n - 1].h == 2160);   // 4K
     for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
-    n = Settings::windowModes(modes, Settings::kMaxModes, 1920, 1080);
-    CHECK(n == 3);
-    CHECK(modes[2].w == 1920 && modes[2].h == 1080);
-    // Every entry is a standard size, whatever the work area looks like.
-    const int areas[][2] = {{1003, 986}, {1279, 719}, {640, 400}, {1366, 728}, {3840, 2120}};
-    for (const auto& a : areas) {
-        n = Settings::windowModes(modes, Settings::kMaxModes, a[0], a[1]);
-        CHECK(n >= 1);
-        for (int i = 0; i < n; ++i) CHECK(Settings::isStandardResolution(modes[i].w, modes[i].h));
-    }
-    // A screen too small for any preset still offers the smallest standard size
-    // (the backend clamps the window to the screen).
-    n = Settings::windowModes(modes, Settings::kMaxModes, 640, 400);
-    CHECK(n == 1);
-    CHECK(modes[0].w == 1280 && modes[0].h == 720);
-    // A leftover non-standard saved size snaps onto the standard list.
+    // Ascending, and independent of the monitor: 1080p and 4K can be picked on a
+    // smaller screen too (the backend fits the window to the screen).
+    for (int i = 1; i < n; ++i)
+        CHECK(modes[i].w * modes[i].h > modes[i - 1].w * modes[i - 1].h);
+    // Non-standard leftovers from older builds snap onto the closest standard
+    // resolution by area -- never into a made-up size.
     Settings s;
-    s.width = 1003; s.height = 986;                  // e.g. written by an older build
-    s.fitToMonitor(1902, 1003);
-    CHECK(s.width == 1600 && s.height == 900);
-    s.width = 3840; s.height = 2160;                 // too big for this screen
-    s.fitToMonitor(1902, 1003);
-    CHECK(s.width == 1600 && s.height == 900);
-    s.width = 1280; s.height = 720;                  // a standard size is kept
-    s.fitToMonitor(3840, 2120);
+    s.width = 1902; s.height = 983;            // the old "largest window that fits"
+    s.snapToStandard();
+    CHECK(s.width == 1920 && s.height == 1080);
+    s.width = 1003; s.height = 986;
+    s.snapToStandard();
     CHECK(s.width == 1280 && s.height == 720);
+    s.width = 2600; s.height = 1450;          // just above QHD
+    s.snapToStandard();
+    CHECK(s.width == 2560 && s.height == 1440);
+    s.width = 3000; s.height = 2000;          // closer to 4K by area
+    s.snapToStandard();
+    CHECK(s.width == 3840 && s.height == 2160);
+    // A standard resolution is kept as it is, even when the screen cannot show it
+    // (the window is fitted, the setting is not).
+    s.width = 3840; s.height = 2160;
+    s.snapToStandard();
+    CHECK(s.width == 3840 && s.height == 2160);
+    s.width = 1920; s.height = 1080;
+    s.snapToStandard();
+    CHECK(s.width == 1920 && s.height == 1080);
 
     // ---- borderless: render resolutions up to 4K + the native resolution ----
     n = Settings::renderModes(modes, Settings::kMaxModes, 1920, 1080);
@@ -1002,7 +994,8 @@ static void testUiScale() {
 // ---------------------------------------------------------------------------
 static void testWindowSizing() {
     // A 1920x1080 laptop whose usable area (taskbar + window frame removed) is
-    // 1902x1003, the exact situation that used to produce a "1902x1003" entry.
+    // 1902x1003: every standard resolution must still be selectable in windowed
+    // mode, with the window fitted to the screen and the setting kept.
     StubPlatform plat;
     plat.setMonitor(1902, 1003);
     plat.setDesktop(1920, 1080);
@@ -1036,38 +1029,60 @@ static void testWindowSizing() {
         CHECK(m.selected() == item);
     };
 
-    // ---- windowed: standard client sizes that fit the work area ------------
+    // The row lists all five standard resolutions, not just the ones that fit.
     navTo(Menu::Resolution);
+    CHECK(m.resolutionCount() == Settings::kPresetCount);
     CHECK(s.width == 1280 && s.height == 720);
     frame(KEY_RIGHT);
     frame(0);
-    CHECK(s.width == 1600 && s.height == 900);                 // 1080p needs 1920 wide
-    CHECK(plat.width() == 1600 && plat.height() == 900);       // backend resized
+    CHECK(s.width == 1600 && s.height == 900);                  // fits: window too
+    CHECK(plat.width() == 1600 && plat.height() == 900);
     CHECK(Settings::isStandardResolution(s.width, s.height));
+
+    // Full HD: the setting is 1920x1080, the window is fitted to 1902x1003.
     frame(KEY_RIGHT);
     frame(0);
-    CHECK(s.width == 1280 && s.height == 720);                 // only 2 entries: wraps
-    CHECK(Settings::isStandardResolution(s.width, s.height));
-    // A whole cycle never leaves the standard list and never exceeds the screen.
+    CHECK(s.width == 1920 && s.height == 1080);
+    CHECK(plat.width() == 1902 && plat.height() == 1003);
+
+    // 4K: selectable as well; the setting is kept and the window stays as large
+    // as the screen allows (never larger than the screen).
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 2560 && s.height == 1440);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 3840 && s.height == 2160);
+    CHECK(plat.width() == 1902 && plat.height() == 1003);
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1280 && s.height == 720);                  // wraps to HD
+
+    // The fitted window never rewrites the setting into a made-up size, and the
+    // mismatch does not re-trigger an apply on later frames.
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1600 && s.height == 900);
     const int applies0 = displayApplies;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < 10; ++i) {
+        frame(0);
+        CHECK(s.width == 1600 && s.height == 900);
+        CHECK(Settings::isStandardResolution(s.width, s.height));
+    }
+    CHECK(displayApplies == applies0);                          // stable, no re-apply
+
+    // Every standard resolution is reachable and nothing but standard values is
+    // ever selected; the window always fits the screen.
+    frame(KEY_RIGHT);
+    frame(0);
+    CHECK(s.width == 1920 && s.height == 1080);
+    for (int i = 0; i < 12; ++i) {
         frame(KEY_RIGHT);
         frame(0);
         CHECK(Settings::isStandardResolution(s.width, s.height));
-        CHECK(s.width <= 1902 && s.height <= 1003);
-        CHECK(plat.width() == s.width && plat.height() == s.height);
+        CHECK(s.width >= 1280 && s.width <= 3840);
+        CHECK(plat.width() <= 1902 && plat.height() <= 1003);
     }
-    CHECK(displayApplies == applies0 + 6);                     // one apply per press
-
-    // The window size in the settings stays standard even though the backend
-    // clamps/drags the window: no "1003x986"-style value is ever produced.
-    for (int i = 0; i < 4; ++i) {
-        FrameInput in = baseInput();
-        in.width = 1003; in.height = 986;                      // as if the user dragged
-        m.update(in, s, audio, plat);
-        CHECK(Settings::isStandardResolution(s.width, s.height));
-    }
-    CHECK(displayApplies == applies0 + 6);                      // ...and no re-apply
 
     // ---- borderless: render resolution list has no odd entry either --------
     navTo(Menu::Mode);
@@ -1114,11 +1129,6 @@ static void testWindowSizing() {
     plat.shutdown();
 }
 
-// ---------------------------------------------------------------------------
-// Regression tests for the "changing the resolution asks twice" report: one
-// user action must produce exactly one backend change and exactly one dialog,
-// and the key that dismisses the dialog must not act on the menu underneath it.
-// This drives the real Game overlay path (Game::stepOverlay), not a copy of it.
 static void testDisplayConfirmOnce() {
     const char* kCfg = "settings_once_test.cfg";
     FILE* pre = std::fopen(kCfg, "rb");
@@ -1178,20 +1188,16 @@ static void testDisplayConfirmOnce() {
         CHECK(changes == 1 && dialogs == 1);
         const int w1 = s.width;
 
-        // A windowed size that no longer fits the screen (e.g. saved on a bigger
-        // monitor) snaps to the largest standard preset that does -- the setting
-        // and the real client area never disagree, and no odd size is applied.
+        // Windowed sizes are standard resolutions: a standard value is *kept*
+        // even when the screen cannot show it (the window is fitted to the
+        // screen instead), and a leftover non-standard value snaps to the
+        // closest standard one.
         {
-            Settings onDisk;
-            onDisk.mode = DisplayMode::Windowed;
-            onDisk.save();
-            Game g2;
+            Game g2;                               // headless: no window limits
             CHECK(g2.init("t", 1280, 720, true));
             CHECK(Settings::isStandardResolution(g2.settings().width, g2.settings().height));
         }
         {
-            // With a backend that reports the real work area, the snap happens
-            // before the window is even asked for that size.
             StubPlatform plat;
             plat.setMonitor(1902, 1003);           // 1920x1080 screen + taskbar/frame
             plat.setDesktop(1920, 1080);
@@ -1199,20 +1205,22 @@ static void testDisplayConfirmOnce() {
             Settings s2;
             s2.mode = DisplayMode::Windowed;
             s2.width = 3840; s2.height = 2160;     // saved on a 4K monitor, not here
-            Game::fitWindowSizeToMonitor(s2, plat);
-            CHECK(s2.width == 1600 && s2.height == 900);
-            CHECK(Settings::isStandardResolution(s2.width, s2.height));
+            Game::snapWindowSizeToStandard(s2);
+            CHECK(s2.width == 3840 && s2.height == 2160);   // the choice is kept
             CHECK(Game::applyDisplayConfigTo(plat, Game::displayConfigOf(s2)));
-            CHECK(plat.width() == 1600 && plat.height() == 900);   // nothing clamped
-            // A standard size that still fits is kept as-is.
-            s2.width = 1280; s2.height = 720;
-            Game::fitWindowSizeToMonitor(s2, plat);
-            CHECK(s2.width == 1280 && s2.height == 720);
+            CHECK(plat.width() == 1902 && plat.height() == 1003);   // window fitted
+            CHECK(plat.mode() == DisplayMode::Windowed);
+            // A non-standard value (older build) snaps to a standard resolution.
+            s2.width = 1902; s2.height = 983;
+            Game::snapWindowSizeToStandard(s2);
+            CHECK(s2.width == 1920 && s2.height == 1080);
+            CHECK(Game::applyDisplayConfigTo(plat, Game::displayConfigOf(s2)));
+            CHECK(plat.width() == 1902 && plat.height() == 1003);
             // Other modes are untouched (their window is the monitor).
             s2.mode = DisplayMode::Borderless;
-            s2.width = 3840;
-            Game::fitWindowSizeToMonitor(s2, plat);
-            CHECK(s2.width == 3840);
+            s2.width = 1003; s2.height = 986;
+            Game::snapWindowSizeToStandard(s2);
+            CHECK(s2.width == 1003 && s2.height == 986);
             plat.shutdown();
         }
 

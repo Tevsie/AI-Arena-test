@@ -78,8 +78,8 @@ public:
     // A restored exclusive mode must be confirmed by the user before it counts
     // as the stable configuration (see init()).
     static bool needsStartupConfirm(DisplayMode mode, bool headless);
-    // Keeps a windowed size on the standard presets the monitor can show.
-    static void fitWindowSizeToMonitor(Settings& s, Platform& p);
+    // Keeps a windowed size on a standard resolution (see snapToStandard).
+    static void snapWindowSizeToStandard(Settings& s);
     // Applies the pending display settings and starts the confirm dialog.
     // Returns false when the backend refused the change (settings are restored).
     bool requestDisplayApply();

@@ -581,6 +581,11 @@ public:
             if (w > maxW) w = maxW;
             if (h > maxH) h = maxH;
         }
+        // Remember what was asked for (e.g. 1920x1080) while the window itself
+        // gets what the screen can show, so moving to a bigger display re-fits it
+        // up to the requested standard resolution.
+        reqW_ = w;
+        reqH_ = h;
         // Apply immediately so the next frame already uses the new size (the
         // async ConfigureNotify confirms it afterwards).
         width_ = w; height_ = h;
@@ -888,6 +893,8 @@ private:
     DisplayMode mode_ = DisplayMode::Windowed;
     DisplayMode pendingMode_ = DisplayMode::Windowed;
     int pendingW_ = 1280, pendingH_ = 720;
+    // Client size the settings asked for (may exceed the fitted window).
+    int reqW_ = 0, reqH_ = 0;
     bool fullscreenHint_ = false;
     int desktopW_ = 0, desktopH_ = 0;
     bool modeSaved_ = false;

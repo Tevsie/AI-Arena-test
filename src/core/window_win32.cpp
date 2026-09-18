@@ -197,6 +197,17 @@ public:
         // Outer size for the requested client area at the monitor's DPI, then
         // centre it on the work area so it is fully visible from the start.
         int fw = 0, fh = 0;
+        // The requested client size is what the settings say (a standard
+        // resolution); the window itself is fitted to the screen, so a 4K setting
+        // on a 1080p display opens a maximally large window instead of one that
+        // hangs off the desktop.
+        reqW_ = w;
+        reqH_ = h;
+        int maxW = 0, maxH = 0;
+        if (maxWindowSize(maxW, maxH)) {
+            if (w > maxW) w = maxW;
+            if (h > maxH) h = maxH;
+        }
         frameSize(systemDpi(), fw, fh);
         int winW = w + fw, winH = h + fh;
         int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
@@ -347,9 +358,12 @@ public:
         // first, otherwise the new resolution would not be applied (and the
         // window could not be centered).
         if (hwnd_ && IsZoomed(hwnd_)) ShowWindow(hwnd_, SW_RESTORE);
-        // Clamp to what the monitor can show: a windowed window must never be
-        // bigger than the screen (the resolution setting asks for a preset, the
-        // monitor decides how much of it fits).
+        // Remember what was asked for (e.g. 1920x1080) and fit the *window* to
+        // what the monitor can show: a windowed window must never be bigger than
+        // the screen. The setting keeps the standard resolution, so moving the
+        // window to a bigger monitor re-fits it up to the requested size.
+        reqW_ = w;
+        reqH_ = h;
         int maxW = 0, maxH = 0;
         if (maxWindowSize(maxW, maxH)) {
             if (w > maxW) w = maxW;
@@ -861,7 +875,8 @@ private:
                 if (mode_ == DisplayMode::Borderless) {
                     fillMonitorRect();
                 } else if (mode_ == DisplayMode::Windowed) {
-                    if (!IsZoomed(hwnd_) && width_ > 0 && height_ > 0) resize(width_, height_);
+                    if (!IsZoomed(hwnd_))
+                        resize(reqW_ > 0 ? reqW_ : width_, reqH_ > 0 ? reqH_ : height_);
                     else syncClientSize();
                 }
                 return 0;
@@ -892,6 +907,9 @@ private:
     DisplayMode pendingMode_ = DisplayMode::Windowed;   // requested before init()
     int pendingW_ = 0, pendingH_ = 0;
     char deviceName_[32]{};
+    // Windowed client size the settings asked for (may be larger than the fitted
+    // window: the standard resolution is kept, the window is fitted to the screen).
+    int reqW_ = 0, reqH_ = 0;
     int desktopW_ = 0, desktopH_ = 0;
     RECT savedRect_{};
     LONG savedStyle_ = 0;

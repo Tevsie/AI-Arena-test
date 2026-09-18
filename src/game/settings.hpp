@@ -8,7 +8,8 @@
 //
 // Resolutions are *list driven* and depend on the display mode:
 //   Windowed   — client sizes that fit the desktop minus decorations/taskbar
-//                (see windowModes()), so a window is never larger than the screen.
+//                (see windowModes()); a size the screen cannot show is fitted to
+//                the screen by the backend while the standard value is kept.
 //   Borderless — internal render resolutions up to 4K (see renderModes()); the
 //                window itself is locked to the monitor's native resolution, so
 //                a resolution here is a render scale, not a window size.
@@ -119,20 +120,15 @@ public:
     // Windowed client sizes: every preset that fits `availW x availH`, plus the
     // usable area itself ("largest window that fits"). `availW/H` <= 0 means the
     // monitor is unknown: all presets are offered. Never returns 0.
-    static int windowModes(Resolution* out, int cap, int availW, int availH) {
+    // Every standard resolution is selectable, whatever the monitor is: the size
+    // is what the user asks the *client area* to be. When the window cannot be
+    // that large, the backend fits it to the screen while the setting keeps the
+    // standard value (see Platform::maxWindowSize / resize).
+    static int windowModes(Resolution* out, int cap) {
         if (!out || cap <= 0) return 0;
-        const bool constrained = availW > 0 && availH > 0;
         int n = 0;
-        for (int i = 0; i < kPresetCount && n < cap; ++i) {
-            if (constrained && (kPresets[i].w > availW || kPresets[i].h > availH))
-                continue;   // does not fit on this monitor
-            out[n++] = kPresets[i];
-        }
-        // Every entry is a standard size (HD .. 4K): if the work area cannot
-        // show even 720p, the smallest one is still offered and the backend
-        // clamps the window to the screen. An arbitrary "fit the work area"
-        // entry (e.g. 1003x986) is deliberately not offered any more.
-        if (n == 0) out[n++] = kPresets[0];
+        for (int i = 0; i < kPresetCount && n < cap; ++i) out[n++] = kPresets[i];
+        if (n == 0) out[n++] = kPresets[0];   // never empty
         return n;
     }
 
@@ -272,16 +268,17 @@ public:
     // 1003x986, or a size that no longer fits after a monitor change — snaps to
     // the largest standard size this screen can show (720p at the very least)
     // instead of being clamped to a made-up resolution.
-    void fitToMonitor(int availW, int availH) {
-        Resolution modes[kMaxModes];
-        int n = windowModes(modes, kMaxModes, availW, availH);
-        if (isStandardResolution(width, height)) {
-            for (int i = 0; i < n; ++i) {
-                if (modes[i].w == width && modes[i].h == height) { clamp(); return; }
-            }
-        }
-        width = modes[n - 1].w;
-        height = modes[n - 1].h;
+    // Windows sizes are standard resolutions. A standard value is always kept
+    // (the backend fits the window to the screen if it is too big for it); any
+    // other value -- a leftover "largest window that fits" of an older build,
+    // e.g. 1003x986 or 1902x983, or a hand-edited config -- snaps to the closest
+    // standard resolution by area (1902x983 -> 1920x1080, 1003x986 -> 1280x720).
+    void snapToStandard() {
+        if (isStandardResolution(width, height)) { clamp(); return; }
+        Resolution modes[kPresetCount];
+        int n = windowModes(modes, kPresetCount);
+        int i = modeIndex(modes, n, width, height);
+        if (i >= 0) { width = modes[i].w; height = modes[i].h; }
         clamp();
     }
 

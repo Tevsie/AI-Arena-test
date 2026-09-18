@@ -169,15 +169,15 @@ bool Game::applyDisplayConfig(const DisplayConfig& cfg) {
 
 // Called when the menu changed a display row: apply it provisionally and ask
 // the user to confirm (an unusable mode must never be saved silently).
-// Windowed sizes are standard presets, so keep the setting on the largest one
-// this monitor can really show: otherwise the backend would have to clamp the
-// window and the setting (1920x1080) would disagree with the real client area
-// (e.g. 1902x1003) -- which also re-triggered an apply loop. No-op for the other
-// modes (their window is the monitor, and exclusive has its own mode pool).
-void Game::fitWindowSizeToMonitor(Settings& s, Platform& p) {
+// Windowed sizes are standard resolutions: a standard value is kept even when
+// the window has to be fitted to the screen (the window may then be smaller than
+// the setting, that is the point -- the user asked to be able to pick 1080p/4K
+// in windowed mode). Only a non-standard value (an old "largest window that
+// fits" of a previous build) snaps to the closest standard resolution. No-op for
+// the other modes: their window is the monitor, and exclusive has its own pool.
+void Game::snapWindowSizeToStandard(Settings& s) {
     if (s.mode != DisplayMode::Windowed) return;
-    int availW = 0, availH = 0;
-    if (p.maxWindowSize(availW, availH)) s.fitToMonitor(availW, availH);
+    s.snapToStandard();
 }
 
 bool Game::requestDisplayApply() {
@@ -192,7 +192,7 @@ bool Game::requestDisplayApply() {
     // can actually show *before* applying: otherwise the backend would have to
     // clamp the window and the setting (1920x1080) would disagree with the real
     // client area (e.g. 1902x1003).
-    fitWindowSizeToMonitor(settings_, *platform_);
+    snapWindowSizeToStandard(settings_);
     const DisplayConfig want = displayConfigOf(settings_);
     if (want == displayStable_ || want == displayPending_) return true;   // nothing to do
     if (!applyDisplayConfig(want)) {
@@ -313,15 +313,12 @@ void Game::renderSizeFor(int winW, int winH, int& rw, int& rh) const {
     if (rh > Settings::kMaxRenderH) rh = Settings::kMaxRenderH;
 }
 
-// Snap the requested window size onto a size the monitor can actually show and
-// apply it. Windowed mode only (borderless/exclusive fullscreen always cover
-// the monitor); a no-op when the backend cannot report a monitor (headless).
+// Snap the requested window size onto a standard resolution and apply it.
+// Windowed mode only (borderless/exclusive fullscreen always cover the monitor).
 void Game::fitWindowToMonitor() {
     if (!platform_ || settings_.mode != DisplayMode::Windowed) return;
-    int availW = 0, availH = 0;
-    if (!platform_->maxWindowSize(availW, availH)) return;
     int w = settings_.width, h = settings_.height;
-    settings_.fitToMonitor(availW, availH);
+    settings_.snapToStandard();
     if (settings_.width != w || settings_.height != h)
         platform_->resize(settings_.width, settings_.height);
     // The borderless render resolution must be a supported entry too.
