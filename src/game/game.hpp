@@ -9,6 +9,7 @@
 #include "../core/platform.hpp"
 #include "../render/renderer.hpp"
 #include "constants.hpp"
+#include "debris.hpp"
 #include "display_confirm.hpp"
 #include "interaction.hpp"
 #include "menu.hpp"
@@ -131,6 +132,8 @@ public:
     void setHudVisible(bool on) { hudOn_ = on; }
     // Renderer access (look toggles, tests).
     Renderer& renderer() { return renderer_; }
+    // Procedural debris pool (stone chips + dust motes). Visual only.
+    Debris& debris() { return debris_; }
 
     // Exposed for tests.
     Wall& wall() { return wall_; }
@@ -144,10 +147,12 @@ private:
     float seedWorld();        // (re)builds the starting platform; returns its top
     void fitWindowToMonitor(); // clamp the windowed size to the monitor
     void drawHud();            // F3 diagnostics overlay
+    void puffAtBrick(int32_t bx, int32_t by);   // dust + chips at a brick face
 
     Platform* platform_ = nullptr;
     Wall wall_;
     Player player_;
+    Debris debris_;
     Interaction interaction_;
     Renderer renderer_;
     Settings settings_;
@@ -169,6 +174,8 @@ private:
     bool prevEsc_ = false;
     bool hudOn_ = false;
     bool benchMode_ = false;
+    float moteTimer_ = 0.0f;
+    float landingSpeed_ = 0.0f;
     int frameLimit_ = 0;
     bool prevF3_ = false;
     bool prevF4_ = false;

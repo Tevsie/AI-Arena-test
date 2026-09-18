@@ -9,6 +9,7 @@
 
 #include "../core/math.hpp"
 #include "../game/constants.hpp"
+#include "../game/debris.hpp"
 #include "../game/player.hpp"
 #include "../game/wall.hpp"
 #include "look.hpp"
@@ -48,6 +49,11 @@ public:
     // ---- golden-hour look ---------------------------------------------------
     // Animated sky (drifting clouds, twinkling stars). Seconds since start.
     void setTime(float seconds) { time_ = seconds; }
+    // Hand the renderer this frame's debris (stone chips + dust). Copied into
+    // the renderer's own staging buffer; drawn with the *brick* program, so
+    // debris costs no extra shader and no extra pipeline state.
+    void setDebris(const DebrisParticle* items, int count);
+
     // The palette that was used for the last frame's altitude (read by the HUD).
     const Look& look() const { return look_; }
     // False when the driver rejected the look shaders and the renderer fell back
@@ -99,6 +105,9 @@ private:
     int blurSrc_ = -1, blurSize_ = -1, blurStep_ = -1;
     int postScene_ = -1, postBloom_ = -1, postRes_ = -1;
     unsigned stoneTex_ = 0, wallBodyTex_ = 0;
+    unsigned debrisVBO_ = 0;
+    int debrisCount_ = 0;
+    Instance debrisStaging_[Debris::CAP]{};
     unsigned wallVAO_ = 0, wallVBO_ = 0;
     // Half-resolution bloom ping-pong (bright pass -> blur X -> blur Y).
     unsigned bloomFBO_ = 0, blurFBO_ = 0, bloomA_ = 0, bloomB_ = 0;

@@ -105,7 +105,7 @@ void main() {
     // a constant density across any brick size.
     vec2 edgeUnits = min(uv, 1.0 - uv) * max(vBrickSize, vec2(1.0));
     float edge = min(edgeUnits.x, edgeUnits.y);
-    float mortarW = max(sideFace, 1.0 - smoothstep(0.0, 0.30, edge));
+    float mortarW = max(sideFace, 1.0 - smoothstep(0.0, 0.22, edge));
     vec2 uvT = uv * max(vBrickSize, vec2(1.0));
 
     vec4 tex = mix(stoneSample(layer, uvT, 1), stoneSample(layer, uvT, 2), crack);
@@ -115,7 +115,7 @@ void main() {
     float tone = vShade * (1.0 / 255.0);
     vec3 albedo = tex.rgb * tint * (0.72 + 0.46 * tone);
     float height = tex.a;
-    float microAO = mix(1.0, height, 0.80);
+    float microAO = mix(1.0, height, 0.65);
 
     // Relief: the height channel *is* the bump field. Its screen-space gradient
     // perturbs the normal (derivative bump mapping, no extra texture fetches).

@@ -351,6 +351,7 @@ float Game::seedWorld() {
 void Game::restart() {
     wall_.reset();
     interaction_.clear();
+    debris_.reset();
     float platformTop = seedWorld();
     player_.reset(48.0f, platformTop + 0.1f, 0.5f);
     player_.highestBrickY = 0;
@@ -371,15 +372,39 @@ void Game::shutdown() {
 
 // Advance the simulation by dt with the given input, without touching the
 // platform or renderer. Used by tests and by run() (which supplies real input).
+// A puff of dust and chips at the face of a brick the player just acted on.
+void Game::puffAtBrick(int32_t bx, int32_t by) {
+    if (headless()) return;
+    AABB b = wall_.brickAABB(bx, by);
+    Vec3 at{(b.mn.x + b.mx.x) * 0.5f, (b.mn.y + b.mx.y) * 0.5f, b.mx.z};
+    debris_.spawnBrickPuff(at, Vec3{0, 0, 1}, 14, 1.0f);
+}
+
 void Game::simulateFrame(const FrameInput& in, float dt) {
     player_.sensitivity = settings_.sensitivity;
     player_.update(in, wall_, dt);
 
     target_ = interaction_.cast(player_, wall_);
     // Clicks (edge events) start 3 s in/out lerps; update() advances them.
-    if (in.mousePressed[MBTN_LEFT] && target_.hit) interaction_.pull(wall_, target_);
-    if (in.mousePressed[MBTN_RIGHT] && target_.hit) interaction_.push(wall_, player_, target_);
+    // A started lerp also coughs dust off the brick face: pulling a brick out of
+    // a wall that has not moved in centuries should look like it.
+    if (in.mousePressed[MBTN_LEFT] && target_.hit && interaction_.pull(wall_, target_))
+        puffAtBrick(target_.bx, target_.by);
+    if (in.mousePressed[MBTN_RIGHT] && target_.hit &&
+        interaction_.push(wall_, player_, target_))
+        puffAtBrick(target_.bx, target_.by);
     interaction_.update(wall_, player_, dt);
+
+    // Debris is visual only, and only simulated with a window: the headless
+    // benchmark stays bit-identical (that is what makes it a baseline).
+    if (!headless()) {
+        debris_.update(dt);
+        moteTimer_ += dt;
+        if (moteTimer_ >= 0.11f) {          // a sparse drift of dust in the sun
+            moteTimer_ = 0.0f;
+            debris_.spawnAmbientMote(player_.eye(), player_.forward());
+        }
+    }
 
     BrickCoord pb = worldToBrick(player_.pos);
     ChunkCoord pc = brickToChunk(pb.x, pb.y);
@@ -479,10 +504,14 @@ void Game::run() {
             if (headless() || benchMode_) demoDrive(dt);
 
             bool wasGrounded = player_.grounded;
+            landingSpeed_ = -player_.vel.y;      // impact speed for the dust puff
             simulateFrame(in, dt);
             if (!headless()) {
                 if (wasGrounded && in.keys[KEY_SPACE]) audio_.play(Sfx::Jump);
-                if (!wasGrounded && player_.grounded) audio_.play(Sfx::Land);
+                if (!wasGrounded && player_.grounded) {
+                    audio_.play(Sfx::Land);
+                    debris_.spawnLandingPuff(player_.pos, std::fabs(landingSpeed_));
+                }
             }
         }
         if (quitRequested_) {
@@ -501,6 +530,7 @@ void Game::run() {
             int renderW = 0, renderH = 0;
             renderSizeFor(in.width, in.height, renderW, renderH);   // render scaling
             renderer_.setTime(float(stats_.elapsed));   // drifting clouds, twinkling stars
+            renderer_.setDebris(debris_.data(), debris_.count());
             stats_.drawnInstances = renderer_.render(wall_, player_, vp, aspect, in.width,
                                                      in.height, renderW, renderH, fov);
             // Overlays (crosshair, menu, modal dialog) always draw at the window
@@ -577,9 +607,8 @@ void Game::drawHud() {
     std::snprintf(line[4], sizeof(line[4]), "LOOK %s  POST %s",
                   renderer_.lookPipeline() ? "GOLDEN" : "LEGACY",
                   renderer_.postEnabled() ? "ON" : "OFF");
-    std::snprintf(line[5], sizeof(line[5]), "BRICKS %4d  MODS %4d",
-                  stats_.residentChunks > 0 ? stats_.residentChunks * CHUNK_BRICKS : 0,
-                  stats_.modifiedBricks);
+    std::snprintf(line[5], sizeof(line[5]), "DEBRIS %3d  MODS %4d",
+                  debris_.count(), stats_.modifiedBricks);
     std::snprintf(line[6], sizeof(line[6]), "GRID %4d %4d",
                   int(player_.pos.x), int(player_.pos.y));
     std::snprintf(line[7], sizeof(line[7]), "F3 HUD   F4 POST   ESC MENU");

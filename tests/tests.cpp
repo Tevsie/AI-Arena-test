@@ -12,6 +12,7 @@
 #include "src/core/input.hpp"
 #include "src/core/platform.hpp"
 #include "src/game/constants.hpp"
+#include "src/game/debris.hpp"
 #include "src/game/game.hpp"
 #include "src/game/grid.hpp"
 #include "src/game/interaction.hpp"
@@ -1744,6 +1745,167 @@ static void testStoneTextures() {
 }
 
 // ---------------------------------------------------------------------------
+// Strata: the stone mix changes with altitude, deterministically.
+// ---------------------------------------------------------------------------
+static void testFamilyStrata() {
+    // Band 0 must reproduce the baseline distribution exactly (the tables were
+    // designed on top of it, and older saves/looks should not shift).
+    int band0[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t* w0 = familyWeights(0);
+    int sum = 0;
+    for (int i = 0; i < 8; ++i) sum += int(w0[i]);
+    CHECK(sum == 256);
+    for (int h = 0; h < 256; ++h) ++band0[brickTypeFor(h, 8, 4)];
+    CHECK(band0[0] == 92);
+    CHECK(band0[1] == 30);
+    CHECK(band0[7] == 30);
+
+    // Every band's weights are a valid distribution.
+    for (int b = 0; b < familyBandCount(); ++b) {
+        const uint8_t* w = familyWeights(b);
+        int total = 0;
+        for (int i = 0; i < 8; ++i) total += int(w[i]);
+        CHECK(total == 256);
+        // No band is a single stone: the wall always reads as mixed rock.
+        for (int i = 0; i < 8; ++i) CHECK(w[i] > 0);
+        CHECK(w[0] > 20);        // plain stone always dominates a little
+    }
+
+    // Adjacent strata differ, and the mix at a given height matches the band.
+    CHECK(familyWeights(1)[2] != familyWeights(0)[2]);      // granite-rich band
+    CHECK(familyWeights(2)[2] > familyWeights(0)[2]);
+    CHECK(familyWeights(3)[3] > familyWeights(0)[3]);       // terracotta band
+    CHECK(familyWeightsFor(8, 10) == familyWeights(familyBandFor(8, 10)));
+    CHECK(familyWeightsFor(8, 400) == familyWeights(familyBandFor(8, 400)));
+
+    // Climbing far enough really does land in a different stratum, and every
+    // stone profile is reachable across the wall.
+    int bandsSeen = 0;
+    bool bandUsed[familyBandCount()] = {false, false, false, false, false, false};
+    bool typeUsed[8] = {false, false, false, false, false, false, false, false};
+    for (int by = -500; by < 1500; by += 7) {
+        for (int bx = -300; bx < 300; bx += 37) {
+            int b = familyBandFor(bx, by) % familyBandCount();
+            if (b < 0) b += familyBandCount();
+            if (!bandUsed[b]) { bandUsed[b] = true; ++bandsSeen; }
+            for (int h = 0; h < 256; h += 17) typeUsed[brickTypeFor(h, bx, by)] = true;
+            // Deterministic: same brick, same answer, forever.
+            CHECK(brickTypeFor(int((hash2d(bx, by) >> 20) & 0xFF), bx, by) ==
+                  brickTypeFor(int((hash2d(bx, by) >> 20) & 0xFF), bx, by));
+        }
+    }
+    CHECK(bandsSeen == familyBandCount());
+    for (int t = 0; t < 8; ++t) CHECK(typeUsed[t]);
+
+    // Pure function of position: two calls with the same inputs agree even far
+    // apart in iteration order (this is what chunk streaming relies on).
+    CHECK(brickTypeFor(77, -13, 640) == brickTypeFor(77, -13, 640));
+    int same = 0, diff = 0;
+    for (int by = 0; by < 2000; by += 13) {
+        if (familyBandFor(0, by) == familyBandFor(0, 0)) ++same; else ++diff;
+    }
+    CHECK(same > 0 && diff > 0);
+
+    // The bottom of the wall starts in band 0 (the first thing the player sees),
+    // and the strata stack: climbing never drops back to an earlier band. The
+    // boundary drifts by a few bricks horizontally, which is the point.
+    CHECK(familyBandFor(0, 0) == 0);
+    CHECK(familyBandFor(7, 40) == 0);
+    CHECK(familyBandFor(0, 200) >= 1);
+    for (int bx : {-64, 0, 64, 200}) {
+        int prev = familyBandFor(bx, -200);
+        for (int by = -200; by < 1200; ++by) {
+            int b = familyBandFor(bx, by);
+            CHECK(b >= prev);
+            prev = b;
+        }
+        CHECK(prev >= 10);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Debris: procedural chips and dust. Visual only, fixed pool, deterministic.
+// ---------------------------------------------------------------------------
+static void testDebris() {
+    Debris a, b;
+    a.reset();
+    b.reset();
+
+    // Deterministic: the same spawn sequence gives the same particles.
+    a.spawnBrickPuff(Vec3{48.0f, 10.0f, 0.0f}, Vec3{0, 0, 1}, 14, 1.0f);
+    b.spawnBrickPuff(Vec3{48.0f, 10.0f, 0.0f}, Vec3{0, 0, 1}, 14, 1.0f);
+    CHECK(a.count() == b.count());
+    CHECK(a.count() > 0);
+    for (int i = 0; i < a.count(); ++i) {
+        CHECK_NEAR(a.at(i).pos.x, b.at(i).pos.x, 1e-6);
+        CHECK_NEAR(a.at(i).vel.y, b.at(i).vel.y, 1e-6);
+        CHECK_NEAR(a.at(i).size, b.at(i).size, 1e-6);
+        CHECK_NEAR(a.at(i).shade, b.at(i).shade, 1e-6);
+    }
+
+    // A puff emits chips *and* dust motes: bigger, longer-lived, slower.
+    int chips = 0, motes = 0;
+    for (int i = 0; i < a.count(); ++i) {
+        const DebrisParticle& p = a.at(i);
+        CHECK(p.size > 0.0f && p.size < 0.6f);
+        CHECK(p.lifeMax > 0.5f && p.lifeMax < 8.0f);
+        CHECK(p.life == 0.0f);
+        CHECK(p.shade >= 0.0f && p.shade <= 255.0f);
+        if (p.size > 0.12f) ++motes; else ++chips;
+    }
+    CHECK(chips > 0 && motes > 0);
+
+    // Everything must live and then die: nothing is immortal.
+    float maxLife = 0.0f;
+    for (int i = 0; i < a.count(); ++i) maxLife = std::max(maxLife, a.at(i).lifeMax);
+    for (float t = 0.0f; t < maxLife + 1.0f; t += 1.0f / 60.0f) a.update(1.0f / 60.0f);
+    CHECK(a.count() == 0);
+
+    // Gravity pulls chips down, and the wall face is a floor.
+    Debris c;
+    c.reset();
+    c.spawnBrickPuff(Vec3{48.0f, 10.0f, -0.1f}, Vec3{0, 0, 1}, 6, 1.0f);
+    float y0 = c.at(0).pos.y;
+    float vy0 = c.at(0).vel.y;
+    c.update(0.05f);
+    CHECK(c.at(0).vel.y < vy0);          // gravity
+    for (int i = 0; i < 200; ++i) c.update(1.0f / 60.0f);
+    bool aboveGround = true;
+    for (int i = 0; i < c.count(); ++i) {
+        if (c.at(i).pos.z < -1.25f) aboveGround = false;
+    }
+    CHECK(aboveGround);
+    (void)y0;
+
+    // The pool is a hard cap: spamming spawns can never grow it.
+    Debris d;
+    d.reset();
+    for (int i = 0; i < 500; ++i)
+        d.spawnBrickPuff(Vec3{0, 0, 0}, Vec3{0, 0, 1}, 20, 3.0f);
+    CHECK(d.count() <= Debris::CAP);
+    CHECK(d.count() == Debris::CAP);
+
+    // reset() clears everything (restart must not leave yesterday's dust).
+    d.reset();
+    CHECK(d.count() == 0);
+
+    // A landing puff scales with the impact, and motes are cheap and small.
+    Debris e;
+    e.reset();
+    e.spawnLandingPuff(Vec3{10.0f, 2.0f, 0.0f}, 2.0f);
+    int soft = e.count();
+    e.reset();
+    e.spawnLandingPuff(Vec3{10.0f, 2.0f, 0.0f}, 18.0f);
+    CHECK(e.count() > soft);
+    e.reset();
+    e.spawnAmbientMote(Vec3{0, 0, 0}, Vec3{0, 0, 1});
+    CHECK(e.count() == 1);
+    CHECK(e.at(0).size < 0.10f);
+    CHECK(e.at(0).pos.z > 0.0f);        // in front of the camera
+    CHECK(e.at(0).pos.z < 12.0f);       // and close enough to be seen
+}
+
+// ---------------------------------------------------------------------------
 // GLSL structural checks.
 //
 // The look shaders can only be compiled by a driver, so the unit tests do the
@@ -1975,6 +2137,8 @@ int main() {
     testLookSky();
     testStoneTextures();
     testShaderSources();
+    testFamilyStrata();
+    testDebris();
 
     fprintf(stderr, "\n[aw-tests] %d passed, %d failed\n", g_pass, g_fail);
     return g_fail == 0 ? 0 : 1;

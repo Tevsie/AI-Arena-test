@@ -138,6 +138,7 @@ inline std::string brickProfileGLSL() {
 
 // Stable mapping from the game's per-brick hash byte to a profile id: mostly
 // plain stone with a scatter of the interesting ones (weights are data).
+// This is band 0's distribution — the baseline the strata below are built on.
 inline int brickTypeFromShade(int shadeByte) {
     int h = shadeByte & 0xff;
     if (h < 92) return 0;    // plain
@@ -148,6 +149,58 @@ inline int brickTypeFromShade(int shadeByte) {
     if (h < 206) return 5;   // water-stained
     if (h < 226) return 6;   // smooth slab
     return 7;                // dark
+}
+
+// ---------------------------------------------------------------------------
+// Strata: the wall is not one stone all the way up. Each band of altitude uses
+// a different mix of the eight profiles (weight tables out of 256), so climbing
+// walks through layers of different rock — and because the band is a pure
+// function of (bx, by), any chunk regenerates identically forever.
+// ---------------------------------------------------------------------------
+inline int familyBandCount() { return 6; }
+
+inline const uint8_t* familyWeights(int band) {
+    static const uint8_t kWeights[][8] = {
+        // plain, sandstone, granite, terracotta, cracked, stained, smooth, dark
+        {92, 30, 24, 20, 20, 20, 20, 30},    // 0: the baseline mixed course
+        {64, 52, 44, 12, 24, 24, 16, 20},    // 1: sandy, warm, drier
+        {46, 22, 70, 10, 30, 30, 28, 20},    // 2: grey granite band
+        {72, 18, 20, 44, 18, 26, 24, 34},    // 3: terracotta / brick band
+        {58, 30, 26, 16, 44, 30, 16, 36},    // 4: crumbled, cracked, stained
+        {84, 26, 22, 14, 22, 34, 30, 24},    // 5: pale, weathered, near the top
+    };
+    int n = familyBandCount();
+    int i = band % n;
+    if (i < 0) i += n;
+    return kWeights[i];
+}
+
+// Height of one stratum, in bricks. A slow horizontal drift keeps the band
+// boundaries from being perfectly flat lines across the wall.
+inline int familyBandFor(int32_t bx, int32_t by) {
+    const int kBandHeight = 96;
+    float drift = float(int(texHash(bx / 24, 0, 7717u) * 5.0f)) - 2.0f;
+    int shifted = int(by) + int(drift * 6.0f);
+    return shifted >= 0 ? shifted / kBandHeight
+                        : -(((-shifted) + kBandHeight - 1) / kBandHeight);
+}
+
+// Weight table that applies to a brick (exposed for tests and tools).
+inline const uint8_t* familyWeightsFor(int32_t bx, int32_t by) {
+    return familyWeights(familyBandFor(bx, by));
+}
+
+// Per-brick stone type: the generator's shade byte remapped through the band's
+// mix, so the same hash byte yields the stone that belongs to this stratum.
+inline int brickTypeFor(int shadeByte, int32_t bx, int32_t by) {
+    const uint8_t* w = familyWeightsFor(bx, by);
+    int h = shadeByte & 0xff;
+    int acc = 0;
+    for (int t = 0; t < 8; ++t) {
+        acc += int(w[t]);
+        if (h < acc) return t;
+    }
+    return 7;
 }
 
 // ---------------------------------------------------------------------------

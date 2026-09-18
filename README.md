@@ -228,6 +228,11 @@ tests/           dependency-free unit tests (grid, store, streaming,
   occlusion), distance fades into the sky behind it, and a bloom + ACES tonemap
   pass finishes the frame. **No asset files**: every texture is generated in code
   at startup, the `.exe` stays self-contained. Tuning lives in `lookKeys()`.
+- **Debris and strata**: pulling or pushing a brick coughs procedural dust and
+  stone chips off the face (landings kick up a ring of dust, and a sparse drift of
+  motes hangs in the sun), and each band of altitude is a different mix of stone
+  types, so climbing walks through changing rock. Both are pure functions of the
+  world: no files, no randomness that survives a restart.
 - **Measuring it**: `atw --bench --novsync --frames 1800` runs the scripted camera
   path (the same one headless mode uses, so runs are comparable) and reports
   avg / p50 / p95 / worst frame times; `F3` shows the same numbers live, `F4`

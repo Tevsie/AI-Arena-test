@@ -250,6 +250,23 @@ exposure + vignette + static dither (kills banding in the big sky gradient) and 
 whisper of grain, applied in the pass that also upscales the scene to the window.
 The scene now always renders through the offscreen target when post is on.
 
+**Debris and dust.** `src/game/debris.hpp` is a fixed 640-particle pool of stone
+chips and dust motes — spawned on every started pull/push (dust at the brick
+face) and on landing (a ring scaled by impact speed), plus a sparse ambient
+drift of motes so the low sun has something to catch. They are drawn as tiny
+cubes by the *brick* program, so a chip catches the same sun, sits in the same
+fog and wears the same stone (its profile comes from the strata of the wall
+around it) at the cost of one extra instanced draw call and no new shader. They
+shrink out as they expire instead of needing alpha, and the pool is a hard cap,
+so frame time cannot spike.
+
+**Strata.** Each ~96-brick band of altitude uses a different mix of the eight
+stone profiles (`familyWeightsFor`), with a slow horizontal drift so the band
+boundaries are not flat lines. The bottom of the wall starts in the baseline
+course; climb and the rock changes — granite bands, terracotta bands, crumbled
+bands near the top. Pure function of (bx, by): a chunk always regenerates
+identically, and old saves do not shift.
+
 **Determinism.** None of this touches simulation: the headless baseline is
 unchanged (`fps=60 chunks=81 inst=7255 mods=45 peakY=44`), and the palette and
 textures are pure functions covered by unit tests (`testLookPalette`,

@@ -338,6 +338,12 @@ bool Renderer::init() {
                            (void*)(17 * sizeof(float)));
     gl.VertexAttribDivisorARB(7, 1);
 
+    // ---- debris buffer (same instance layout, own range) --------------------
+    gl.GenBuffers(1, &debrisVBO_);
+    gl.BindBuffer(GL_ARRAY_BUFFER, debrisVBO_);
+    gl.BufferData(GL_ARRAY_BUFFER, GLsizeiptr(Debris::CAP) * kInstanceStride, nullptr,
+                  GL_STREAM_DRAW);
+
     // ---- fullscreen triangle VAO -------------------------------------------
     float tri[6] = {-1, -1, 3, -1, -1, 3};
     gl.GenVertexArrays(1, &fullVAO_);
@@ -532,6 +538,7 @@ void Renderer::shutdown() {
     if (wallVAO_) gl.DeleteVertexArrays(1, &wallVAO_);
     if (cubeVBO_) gl.DeleteBuffers(1, &cubeVBO_);
     if (instVBO_) gl.DeleteBuffers(1, &instVBO_);
+    if (debrisVBO_) gl.DeleteBuffers(1, &debrisVBO_);
     if (fullVBO_) gl.DeleteBuffers(1, &fullVBO_);
     if (uiRectVBO_) gl.DeleteBuffers(1, &uiRectVBO_);
     if (uiTextVBO_) gl.DeleteBuffers(1, &uiTextVBO_);
@@ -542,7 +549,7 @@ void Renderer::shutdown() {
     if (fontTex_) gl.DeleteTextures(1, &fontTex_);
     brickProg_ = skyProg_ = crosshairProg_ = uiRectProg_ = uiTextProg_ = blitProg_ = 0;
     wallProg_ = brightProg_ = blurProg_ = postProg_ = 0;
-    cubeVBO_ = instVBO_ = fullVBO_ = uiRectVBO_ = uiTextVBO_ = wallVBO_ = 0;
+    cubeVBO_ = instVBO_ = debrisVBO_ = fullVBO_ = uiRectVBO_ = uiTextVBO_ = wallVBO_ = 0;
     cubeVAO_ = fullVAO_ = uiRectVAO_ = uiTextVAO_ = wallVAO_ = fontTex_ = 0;
     postReady_ = lookPipeline_ = false;
     ready_ = false;
@@ -760,6 +767,37 @@ void Renderer::blitScene(int windowW, int windowH) {
     gl.DepthMask(GL_TRUE);
 }
 
+// Debris -> instance stream. Chips shrink as they expire (the brick shader has
+// no alpha), inherit the stone of the wall they came from and keep the
+// simulation's per-chip tone, so a puff reads as this wall's dust.
+void Renderer::setDebris(const DebrisParticle* items, int count) {
+    if (!items || count <= 0) {
+        debrisCount_ = 0;
+        return;
+    }
+    if (count > Debris::CAP) count = Debris::CAP;
+    int n = 0;
+    for (int i = 0; i < count; ++i) {
+        const DebrisParticle& p = items[i];
+        float k = p.lifeMax > 0.0f ? clampf(p.life / p.lifeMax, 0.0f, 1.0f) : 1.0f;
+        float s = p.size * (1.0f - 0.75f * k * k);      // shrink out instead of fading
+        if (s <= 1e-4f) continue;
+        Instance& inst = debrisStaging_[n++];
+        std::memset(inst.model, 0, sizeof(inst.model));
+        inst.model[0] = s;
+        inst.model[5] = s;
+        inst.model[10] = s;
+        inst.model[12] = p.pos.x;
+        inst.model[13] = p.pos.y;
+        inst.model[14] = p.pos.z;
+        inst.model[15] = 1.0f;
+        inst.shade = p.shade;
+        // Same strata as the wall around it: a chip looks like the stone it fell off.
+        inst.type = float(brickTypeFor(int(p.shade), floori(p.pos.x), floori(p.pos.y)));
+    }
+    debrisCount_ = n;
+}
+
 int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewProj,
                      float aspect, int width, int height, int renderW, int renderH,
                      float fovDeg) {
@@ -826,9 +864,11 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                 inst.model[14] = d - e * 0.5f + jz;   // rigid slide outward (+Z)
                 inst.model[15] = 1.0f;
                 inst.shade = float(ch.shade[i]);
-                // Stone profile purely from the generator's per-brick hash, so the
-                // wall never repeats and no gameplay data is touched.
-                inst.type = float(brickTypeFromShade(ch.shade[i]));
+                // Stone profile from the generator's per-brick hash, remapped by
+                // the altitude band: pure functions of (bx, by), so the wall never
+                // repeats, climbing changes what the wall is made of, and a chunk
+                // always regenerates identically. No gameplay data is touched.
+                inst.type = float(brickTypeFor(ch.shade[i], bx, by));
             }
             GLsizeiptr offset = GLsizeiptr(size_t(ch.slot) * CHUNK_BRICKS * kInstanceStride);
             gl.BufferSubData(GL_ARRAY_BUFFER, offset,
@@ -927,6 +967,25 @@ int Renderer::render(const Wall& wall, const Player& player, const Mat4& viewPro
                                (void*)(base + 16 * sizeof(float)));
         gl.DrawArraysInstancedARB(GL_TRIANGLES, 0, 36, ch.brickCount);
     });
+
+    // ---- debris (stone chips + dust) ----------------------------------------
+    // Drawn with the brick program, the same uniforms and the same textures as
+    // the wall: a chip catches the same sun and fades into the same air, so it
+    // reads as stone off *this* wall rather than as a generic particle.
+    if (debrisCount_ > 0) {
+        gl.BindVertexArray(cubeVAO_);
+        gl.BindBuffer(GL_ARRAY_BUFFER, debrisVBO_);
+        gl.BufferSubData(GL_ARRAY_BUFFER, 0,
+                         GLsizeiptr(debrisCount_) * kInstanceStride, debrisStaging_);
+        for (int i = 0; i < 4; ++i)
+            gl.VertexAttribPointer(2 + i, 4, GL_FLOAT, GL_FALSE, kInstanceStride,
+                                   (void*)(size_t(i) * 4 * sizeof(float)));
+        gl.VertexAttribPointer(6, 1, GL_FLOAT, GL_FALSE, kInstanceStride,
+                               (void*)(16 * sizeof(float)));
+        gl.VertexAttribPointer(7, 1, GL_FLOAT, GL_FALSE, kInstanceStride,
+                               (void*)(17 * sizeof(float)));
+        gl.DrawArraysInstancedARB(GL_TRIANGLES, 0, 36, debrisCount_);
+    }
 
     // ---- present to the window ----------------------------------------------
     // Post-processing grades the scene and upscales it in the same pass; without
