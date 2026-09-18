@@ -39,14 +39,30 @@ jobs:
           echo "exit=$code" >> winbuild.log
           exit $code
 
-      - name: Upload Windows build log (CI debug)
-        if: failure()
+      - name: Publish build diagnostics to ci/logs
+        if: always()
         shell: bash
         run: |
+          # The .exe is the shipped artifact, so record what it actually is
+          # (size, imported DLLs, hash) on the ci/logs branch: that is the only
+          # copy of the build output we can read back without downloading it.
+          {
+            echo "== toolchain =="
+            x86_64-w64-mingw32-g++ --version | head -2
+            echo "== atw.exe =="
+            ls -l atw.exe 2>/dev/null || echo "no atw.exe"
+            sha256sum atw.exe 2>/dev/null
+            echo "== imported DLLs (must not include libstdc++ / libgcc) =="
+            x86_64-w64-mingw32-objdump -p atw.exe 2>/dev/null | grep "DLL Name" || true
+            echo "== Linux binary =="
+            ls -l build/atw 2>/dev/null || true
+            echo "== build log =="
+            cat winbuild.log 2>/dev/null || true
+          } > diagnostics.txt 2>&1
           git config user.name  "CI"
           git config user.email "ci@users.noreply.github.com"
-          git add -f winbuild.log
-          git commit -m "winbuild log" || true
+          git add -f diagnostics.txt winbuild.log 2>/dev/null || git add -f diagnostics.txt
+          git commit -m "build diagnostics" || true
           git push origin "HEAD:ci/logs" --force || true
 
       - name: Upload binaries
